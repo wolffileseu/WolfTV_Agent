@@ -1,0 +1,17 @@
+# local config & secrets — never commit
+config.json
+
+# build output
+wolftv-agent
+wolftv-agent.exe
+*.exe
+dist/
+
+# logs / runtime
+*.log
+agent.log
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/

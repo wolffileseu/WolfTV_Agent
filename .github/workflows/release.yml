@@ -1,0 +1,24 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Build Linux + Windows
+        run: |
+          mkdir -p dist
+          GOOS=linux   GOARCH=amd64 go build -ldflags "-s -w" -o dist/wolftv-agent .
+          GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -o dist/wolftv-agent.exe .
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/wolftv-agent
+            dist/wolftv-agent.exe
