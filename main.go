@@ -228,6 +228,11 @@ func handleStop(w http.ResponseWriter, r *http.Request) {
 	st.currentServer = ""
 	st.mu.Unlock()
 
+	// abort any in-flight replay so it does not linger against a stopped broadcast
+	if rp != nil {
+		replay.stop()
+	}
+
 	if obs, err := obsClient(); err == nil {
 		_, _ = obs.Stream.StopStream()
 		obs.Disconnect()
@@ -420,6 +425,7 @@ func main() {
 	go audioMonitor()
 	go winAudioMonitor()
 	startSysMonitor(cfg.DiskPath)
+	setupReplay() // second (replay) instance + goroutines; no-op unless enabled
 	http.HandleFunc("/start", handleStart)
 	http.HandleFunc("/switch", handleSwitch)
 	http.HandleFunc("/exec", handleExec)
@@ -431,6 +437,10 @@ func main() {
 	http.HandleFunc("/follow", handleFollow)
 	http.HandleFunc("/log", handleLog)
 	http.HandleFunc("/system", handleSystem)
+	http.HandleFunc("/replay", handleReplay)
+	http.HandleFunc("/replay/segments", handleReplaySegments)
+	http.HandleFunc("/replay/stop", handleReplayStop)
+	http.HandleFunc("/replay/status", handleReplayStatus)
 	log.Println("wolffiles-stream-agent v3 listening on", cfg.Listen)
 	log.Fatal(http.ListenAndServe(cfg.Listen, nil))
 }
