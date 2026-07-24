@@ -6,6 +6,8 @@
   "et_exe_name": "wolftv.exe",
   "_comment_et_args": "Pin every cvar the live instance depends on here: command-line +set is applied AFTER the config file is exec'd, which makes the live instance immune to what the replay instance (same homepath, same etconfig.cfg) persists. s_initsound / cl_wtvFallback / db_mode are pinned for exactly that reason -- the replay instance forces them to 0/0/1.",
   "et_args": ["+set", "fs_homepath", "C:\\Stream\\livehome", "+set", "fs_game", "silent", "+set", "cl_wtvPort", "8790", "+set", "cl_wtvTitle", "WolfTV-1", "+set", "cl_wtvDemo", "1", "+set", "cl_wtvFallback", "1", "+set", "s_initsound", "1", "+set", "db_mode", "2"],
+  "_comment_resolution": "Stream resolution preset: 720p | 1080p | 1440p | 2160p. Translated into +set r_mode -1 / r_customwidth / r_customheight for BOTH the live and replay instance, so you don't hand-edit those. Explicit r_custom* in et_args always wins (and is logged once). Unknown value -> warns and falls back to 1080p. Omit or leave empty to drive resolution purely from et_args.",
+  "resolution": "1080p",
 
   "obs_path": "C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe",
   "obs_addr": "127.0.0.1:4455",

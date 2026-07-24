@@ -7,16 +7,20 @@ import (
 )
 
 type Config struct {
-	Listen          string   `json:"listen"`            // "0.0.0.0:8788"
-	Token           string   `json:"token"`             // bearer token (min 16)
-	EtPath          string   `json:"et_path"`           // "C:\\ETLegacy\\etl.exe"
-	EtExeName       string   `json:"et_exe_name"`       // "etl.exe"
-	EtArgs          []string `json:"et_args"`           // extra args
-	ObsPath         string   `json:"obs_path"`          // obs64.exe ("" = never launch)
-	ObsAddr         string   `json:"obs_addr"`          // "localhost:4455"
-	ObsPassword     string   `json:"obs_password"`      // "" = none
-	ObsBrowserInput string   `json:"obs_browser_input"` // overlay source name, "" = skip
-	KillObsOnStop   bool     `json:"kill_obs_on_stop"`
+	Listen    string   `json:"listen"`      // "0.0.0.0:8788"
+	Token     string   `json:"token"`       // bearer token (min 16)
+	EtPath    string   `json:"et_path"`     // "C:\\ETLegacy\\etl.exe"
+	EtExeName string   `json:"et_exe_name"` // "etl.exe"
+	EtArgs    []string `json:"et_args"`     // extra args
+	// Resolution preset (720p|1080p|1440p|2160p) translated into r_mode/
+	// r_customwidth/r_customheight at launch, for both instances. Explicit
+	// r_custom* in et_args wins. "" = leave et_args untouched.
+	Resolution      string `json:"resolution"`
+	ObsPath         string `json:"obs_path"`          // obs64.exe ("" = never launch)
+	ObsAddr         string `json:"obs_addr"`          // "localhost:4455"
+	ObsPassword     string `json:"obs_password"`      // "" = none
+	ObsBrowserInput string `json:"obs_browser_input"` // overlay source name, "" = skip
+	KillObsOnStop   bool   `json:"kill_obs_on_stop"`
 
 	// OBS scenes used for cutting the broadcast
 	SceneLive    string `json:"scene_live"`    // main scene (default "Live")

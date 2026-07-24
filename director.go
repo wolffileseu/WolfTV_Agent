@@ -40,7 +40,7 @@ func (in *instance) spawn(args []string) error {
 }
 
 func startET(server, password string) error {
-	args := append([]string{}, cfg.EtArgs...)
+	args := withResolution(cfg.EtArgs, cfg.Resolution)
 	if password != "" {
 		args = append(args, "+password", password)
 	}

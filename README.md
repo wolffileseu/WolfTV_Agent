@@ -316,6 +316,23 @@ Prebuilt binaries for both platforms are attached to each
 3. Point the [panel](https://github.com/wolffileseu/wolftv-panel) at the
    agent's URL and token.
 
+### Resolution
+
+Set `"resolution"` to a preset instead of hand-editing `r_mode` /
+`r_customwidth` / `r_customheight` in `et_args`:
+
+| preset | pixels |
+|--------|--------|
+| `720p`  | 1280×720  |
+| `1080p` | 1920×1080 |
+| `1440p` | 2560×1440 |
+| `2160p` | 3840×2160 |
+
+It is applied to **both** the live and replay instances. Explicit `r_custom*`
+already in `et_args` wins (and is logged once), so existing configs are
+unchanged. An unknown value warns and falls back to `1080p`. Leave it empty to
+drive resolution purely from `et_args`.
+
 ### Security
 
 The agent's control port lets a caller drive your stream and run client

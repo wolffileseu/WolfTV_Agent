@@ -267,7 +267,9 @@ var replayForcedCvars = []string{"cl_wtvDemo", "cl_wtvFallback", "s_initsound", 
 //
 // fs_game is the MOD THAT RECORDED THE DEMO, not the live one.
 func buildReplayArgs(base []string, homepath, mod, profile, title string, port int) []string {
-	out := stripArg(base, "+connect") // never auto-connect
+	// same resolution preset as the live instance (explicit r_custom* still wins)
+	out := withResolution(base, cfg.Resolution)
+	out = stripArg(out, "+connect") // never auto-connect
 	out = setArg(out, "fs_homepath", homepath)
 	out = setArg(out, "fs_game", mod) // demos are only playable by their own mod
 	out = setArg(out, "cl_wtvPort", fmt.Sprintf("%d", port))
