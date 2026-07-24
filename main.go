@@ -49,6 +49,10 @@ type instance struct {
 	etDone        chan struct{}
 	pipeCaps      map[string]bool
 	clientVersion string
+	// vidRestarted: the replay instance gets one vid_restart after its first
+	// hello so its resolution does not depend on what its (possibly empty, fresh)
+	// profile config contains. Reset on every (re)spawn.
+	vidRestarted bool
 
 	// audio monitor
 	audioMonUp    bool

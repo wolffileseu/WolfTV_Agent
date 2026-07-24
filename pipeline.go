@@ -182,6 +182,12 @@ func (in *instance) pipeLoop() {
 				}
 			case "status", "state", "mapchange", "download", "disconnect":
 				wasDisconnected := in.tele.State == "disconnected"
+				// "was connected" means we had a real, non-disconnected state
+				// before. The empty initial state ("") is NOT connected: the
+				// replay instance never joins a server, so its very first status
+				// is state=disconnected -- that is normal idle, not a drop, and
+				// must not be logged as a "client disconnect:" with empty reason.
+				wasConnected := in.tele.State != "" && in.tele.State != "disconnected"
 				// map change: server-side follow is lost -> reset director
 				// so it re-specs and re-follows within seconds
 				if m.Ev == "mapchange" ||
@@ -215,7 +221,15 @@ func (in *instance) pipeLoop() {
 					in.tele.Reason = m.Reason
 					if !wasDisconnected {
 						in.discSince = time.Now() // start timer on TRANSITION only
-						log.Printf("pipeline[%s]: client disconnect: %s", in.name, m.Reason)
+						// A genuine drop is an explicit disconnect event or a
+						// transition INTO disconnected from a connected state.
+						// The idle replay instance reporting disconnected from
+						// its initial "" is neither -- it never joins a server --
+						// so that is not logged as a "client disconnect:" with an
+						// empty reason. The watchdog timer (live only) is unchanged.
+						if m.Ev == "disconnect" || wasConnected {
+							log.Printf("pipeline[%s]: client disconnect: %s", in.name, m.Reason)
+						}
 					}
 				} else if in.tele.State != "disconnected" {
 					in.discSince = time.Time{} // recovered -> clear timer

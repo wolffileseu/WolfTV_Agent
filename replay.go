@@ -755,6 +755,7 @@ func ensureReplayUp(mod string, timeout time.Duration, cancel <-chan struct{}) e
 		rp.pipeCaps = nil
 		rp.tele = Telemetry{}
 		rp.fsGame = mod
+		rp.vidRestarted = false // fresh process -> vid_restart again after hello
 		if err := rp.spawn(args); err != nil {
 			rp.fsGame = ""
 			rp.mu.Unlock()
@@ -774,11 +775,42 @@ func ensureReplayUp(mod string, timeout time.Duration, cancel <-chan struct{}) e
 		up := rp.pipeUp && rp.pipeCaps != nil
 		rp.mu.Unlock()
 		if up {
+			ensureReplayVidRestart(cancel)
 			return nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	return errStr("replay pipeline hello timeout")
+}
+
+// ensureReplayVidRestart sends vid_restart to the replay instance exactly once
+// per process lifetime, right after its first hello and BEFORE any demo loads
+// (the live scene is still on air). A freshly created ET profile has no saved
+// config, so resolution cvars (r_mode/r_customwidth/...) come up latched at the
+// wrong value until a vid_restart applies the ones passed on the command line.
+// Doing it here makes the replay window independent of what the profile
+// contains. It never touches the live instance. The socket is engine-level and
+// survives the renderer restart; a short settle wait lets the window come back.
+func ensureReplayVidRestart(cancel <-chan struct{}) {
+	if rp == nil {
+		return
+	}
+	rp.mu.Lock()
+	need := !rp.vidRestarted && rp.pipeUp
+	if need {
+		rp.vidRestarted = true
+		rp.pipeExecLocked("vid_restart")
+	}
+	rp.mu.Unlock()
+	if !need {
+		return
+	}
+	log.Println("replay: vid_restart after hello (make resolution independent of the profile config)")
+	// let the renderer come back before we start driving the demo.
+	select {
+	case <-time.After(3 * time.Second):
+	case <-cancel:
+	}
 }
 
 // waitReplayActive waits until the replay instance reports demo playback is
