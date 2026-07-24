@@ -172,7 +172,8 @@ func autoDirectorLoop() {
 	for {
 		time.Sleep(1 * time.Second)
 		dc := dcfg.get()
-		if !dc.AutoReplay {
+		// inert unless auto-replay is on AND a replay instance exists to drive.
+		if !dc.AutoReplay || !cfg.ReplayEnabled || rp == nil {
 			continue
 		}
 		auto.tick(dc)
