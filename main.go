@@ -69,6 +69,7 @@ type instance struct {
 	specSent      bool
 	activeSince   time.Time
 	nextSwitch    time.Time
+	lastSwitch    time.Time // when the camera last actually changed target (spike cadence)
 	curTarget     string
 	curTargetSlot int
 }

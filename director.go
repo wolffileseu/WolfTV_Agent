@@ -198,6 +198,22 @@ func directorLoop() {
 			}
 		}
 
+		// spike override (Part 2): if a player is far hotter than everyone else
+		// and the camera is not on them, cut early -- that is where the next
+		// multikill is coming from. This overrides the dir_min_sec floor, but
+		// only every spikeMinIntervalSec so a busy fight can't make it twitch.
+		dc := dcfg.get()
+		if leader, top, second := leaderByHeat(
+			feed.heatBySlot(time.Now().UnixMilli(), dc.HeatWindowSec, dc.HeatHalfLifeSec)); leader >= 0 &&
+			leader != st.curTargetSlot && top >= heatSpikeFloor && top >= dc.HeatSpikeFactor*second &&
+			time.Since(st.lastSwitch) >= spikeMinIntervalSec*time.Second &&
+			time.Now().After(st.manualUntil) {
+			if st.nextSwitch.After(time.Now()) {
+				log.Printf("director: heat spike slot %d (%.2f vs %.2f) -> early switch", leader, top, second)
+			}
+			st.nextSwitch = time.Now()
+		}
+
 		// 2) camera switch due?
 		if time.Now().Before(st.nextSwitch) {
 			st.mu.Unlock()
@@ -208,17 +224,22 @@ func directorLoop() {
 		curSlot := st.curTargetSlot
 		st.mu.Unlock()
 
+		// fresh heat for the pick itself (the demo camera should already be on
+		// the hottest player when the next highlight lands).
+		heat := feed.heatBySlot(time.Now().UnixMilli(), dc.HeatWindowSec, dc.HeatHalfLifeSec)
+
 		// preferred: exact player/team info straight from the client
 		if players, qok := queryPlayers(2 * time.Second); qok {
-			slot, raw, name, ping, found := pickFromQuery(players, cfg.WatchName, curSlot, server)
+			slot, raw, name, ping, found := pickFromQuery(players, cfg.WatchName, curSlot, server, heat)
 			st.mu.Lock()
 			if found {
 				st.curTarget = name
 				st.curTargetSlot = slot
+				st.lastSwitch = time.Now()
 				// silEnT (and most mods) match "follow <slot>", NOT the name.
 				// Slots are reliable since the client-side off-by-N fix.
 				st.pipeExecLocked(fmt.Sprintf("follow %d", slot))
-				log.Printf("director: follow slot %d %q (ping %d)", slot, name, ping)
+				log.Printf("director: follow slot %d %q (ping %d, heat %.2f)", slot, name, ping, heat[slot])
 				_ = raw
 			} else {
 				log.Println("director: nobody playing (specs only) -> free cam")
@@ -234,6 +255,7 @@ func directorLoop() {
 		st.mu.Lock()
 		if ok {
 			st.curTarget = cleanName(raw)
+			st.lastSwitch = time.Now()
 			st.pipeExecLocked(`follow "` + strings.ReplaceAll(raw, `"`, "") + `"`)
 			log.Printf("director: follow %q (ping %d)", st.curTarget, ping)
 		} else {
@@ -339,11 +361,58 @@ func watchdog() {
 	}
 }
 
-/* pickFromQuery selects a follow target from the client-provided player
- * list: only teams 1/2 (never spectators), never ourselves, humans
- * preferred via a best-effort getstatus ping lookup, avoid repeating the
- * current slot when possible. */
-func pickFromQuery(players []pipePlayer, self string, curSlot int, serverAddr string) (int, string, string, int, bool) {
+// heatSpikeFloor is the minimum leader heat (~two fresh kills) before a spike
+// can override the dir_min_sec camera floor; spikeMinIntervalSec bounds how
+// often a spike may cut, so a busy fight does not make the camera twitch.
+const (
+	heatSpikeFloor      = 1.8
+	spikeMinIntervalSec = 8
+)
+
+// heatForCands restricts a heat map to the candidate slots (so the leader used
+// for the spike check is someone actually followable right now, not a player
+// who has since left).
+func heatForCands(heat map[int]float64, cands []pipePlayer) map[int]float64 {
+	out := map[int]float64{}
+	for _, p := range cands {
+		if v, ok := heat[p.Slot]; ok {
+			out[p.Slot] = v
+		}
+	}
+	return out
+}
+
+// pickByHeat chooses the hottest candidate. Heat is primary; a human beats a bot
+// only as a tiebreaker (tiny nudge), and the current slot is nudged down so an
+// exact tie does not needlessly re-pick the same player. Pure and unit-tested.
+func pickByHeat(cands []pipePlayer, heat map[int]float64, humanBySlot map[int]bool, curSlot int) (pipePlayer, bool) {
+	if len(cands) == 0 {
+		return pipePlayer{}, false
+	}
+	best := -1
+	var bestScore float64
+	for i, p := range cands {
+		s := heat[p.Slot]
+		if humanBySlot[p.Slot] {
+			s += 1e-6
+		}
+		if p.Slot == curSlot {
+			s -= 1e-9
+		}
+		if best < 0 || s > bestScore {
+			best, bestScore = i, s
+		}
+	}
+	return cands[best], true
+}
+
+/* pickFromQuery selects a follow target from the client-provided player list:
+ * only teams 1/2 (never spectators), never ourselves. The choice is weighted by
+ * heat (recent-kill activity) so the camera sits on whoever is most likely to
+ * make the next highlight; humans are preferred only as a tiebreaker. When
+ * nobody is hot (e.g. the opening of a map) it falls back to the previous
+ * human-preferred random pick, which spreads the camera around. */
+func pickFromQuery(players []pipePlayer, self string, curSlot int, serverAddr string, heat map[int]float64) (int, string, string, int, bool) {
 	selfC := strings.ToLower(cleanName(self))
 	var cands []pipePlayer
 	for _, p := range players {
@@ -364,21 +433,36 @@ func pickFromQuery(players []pipePlayer, self string, curSlot int, serverAddr st
 			pings[strings.ToLower(cleanName(p.Name))] = p.Ping
 		}
 	}
-	if cfg.PreferHumans && len(pings) > 0 {
-		var humans []pipePlayer
-		for _, p := range cands {
-			if pings[strings.ToLower(cleanName(p.Name))] > 0 {
-				humans = append(humans, p)
-			}
-		}
-		if len(humans) > 0 {
-			cands = humans
+	humanBySlot := map[int]bool{}
+	for _, p := range cands {
+		if pings[strings.ToLower(cleanName(p.Name))] > 0 {
+			humanBySlot[p.Slot] = true
 		}
 	}
-	pick := cands[rng.Intn(len(cands))]
-	if len(cands) > 1 {
-		for guard := 0; guard < 8 && pick.Slot == curSlot; guard++ {
-			pick = cands[rng.Intn(len(cands))]
+
+	var pick pipePlayer
+	if _, top, _ := leaderByHeat(heatForCands(heat, cands)); top > 0 {
+		// somebody is on the boil -> follow the heat.
+		pick, _ = pickByHeat(cands, heat, humanBySlot, curSlot)
+	} else {
+		// quiet: prefer humans, pick at random, avoid repeating the current slot.
+		pool := cands
+		if cfg.PreferHumans && len(humanBySlot) > 0 {
+			var humans []pipePlayer
+			for _, p := range cands {
+				if humanBySlot[p.Slot] {
+					humans = append(humans, p)
+				}
+			}
+			if len(humans) > 0 {
+				pool = humans
+			}
+		}
+		pick = pool[rng.Intn(len(pool))]
+		if len(pool) > 1 {
+			for guard := 0; guard < 8 && pick.Slot == curSlot; guard++ {
+				pick = pool[rng.Intn(len(pool))]
+			}
 		}
 	}
 	name := cleanName(pick.Name)

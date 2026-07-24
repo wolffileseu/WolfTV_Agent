@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -174,6 +175,72 @@ func (f *eventFeed) addAction(a ActionEvent) {
 	if len(f.events) > f.maxEvents {
 		f.events = f.events[len(f.events)-f.maxEvents:]
 	}
+}
+
+/* ---------------- heat: recent-kill activity per player (Part 2) ---------------- */
+
+// killSample is one recent kill by a known slot, for heat weighting.
+type killSample struct {
+	slot int
+	recv int64 // agent unix ms
+}
+
+// heatScores turns recent kills into a per-slot "heat": each kill contributes a
+// recency weight of 0.5^(age/halfLife), so a fresh kill counts ~1 and older ones
+// decay smoothly. A player on a quick multikill therefore has the highest heat
+// exactly when the camera should already be on them. Pure and unit-tested.
+func heatScores(samples []killSample, now int64, halfLifeMs float64) map[int]float64 {
+	if halfLifeMs <= 0 {
+		halfLifeMs = 1
+	}
+	h := map[int]float64{}
+	for _, s := range samples {
+		age := float64(now - s.recv)
+		if age < 0 {
+			age = 0
+		}
+		h[s.slot] += math.Exp2(-age / halfLifeMs) // 2^(-age/halfLife) == 0.5^(...)
+	}
+	return h
+}
+
+// leaderByHeat returns the hottest slot with its heat and the runner-up heat,
+// used for the spike override. slot is -1 when there is no heat at all.
+func leaderByHeat(heat map[int]float64) (slot int, top, second float64) {
+	slot = -1
+	for s, v := range heat {
+		switch {
+		case v > top:
+			second, top, slot = top, v, s
+		case v > second:
+			second = v
+		}
+	}
+	return slot, top, second
+}
+
+// recentKills returns the kills with a known attacker slot within windowMs of
+// now, as heat samples.
+func (f *eventFeed) recentKills(now int64, windowMs int64) []killSample {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []killSample
+	for _, e := range f.events {
+		if e.Kind != "kill" || e.AttackerSlot < 0 {
+			continue
+		}
+		if now-e.Recv > windowMs {
+			continue
+		}
+		out = append(out, killSample{slot: e.AttackerSlot, recv: e.Recv})
+	}
+	return out
+}
+
+// heatBySlot computes current per-slot heat from the recent-kill window.
+func (f *eventFeed) heatBySlot(now int64, windowSec int, halfLifeSec float64) map[int]float64 {
+	samples := f.recentKills(now, int64(windowSec)*1000)
+	return heatScores(samples, now, halfLifeSec*1000)
 }
 
 func (f *eventFeed) pushHighlightLocked(h Highlight) {
