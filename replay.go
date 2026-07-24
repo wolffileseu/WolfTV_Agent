@@ -127,51 +127,218 @@ func portFromAddr(addr string) (int, bool) {
 	return n, true
 }
 
-// demoRelPath is the game-relative path used to locate a segment's demo file.
-// Prefers the path the engine reported; falls back to <demoDir>/<file>.
-func demoRelPath(seg DemoSegment, demoDir string) string {
+/* ------------------------------ mod resolution ------------------------------ */
+
+// A demo can only be played back by the mod that recorded it: the demo stream
+// carries that mod's gamestate, and the client checks the pk3s it references.
+// The client stores each segment under a mod directory inside the flat demo
+// root and reports both parts on the pipeline:
+//
+//	"file" = "wtv_<map>_<svtime>.dm_84"        (basename)
+//	"path" = "<mod>/wtv_<map>_<svtime>.dm_84"  (relative to the demo root)
+//	"mod"  = "<mod>"
+//
+// so the mod comes from the message, either as its own field or as the
+// directory in "path". Nothing is parsed out of the filename: a mod name
+// (no_quarter) and a map name (etl_sp_delivery) can both contain underscores,
+// which is exactly why the client puts the mod in a path segment.
+
+// validDemoPath mirrors the client's WTV_ValidDemoRelPath: the argument of
+// `wtvdemo` is either "<mod>/<file>" -- exactly one directory level -- or a
+// bare "<file>", with each segment made only of [A-Za-z0-9._-] and never "."
+// or "..". The value reaches us over the pipeline and leaves as a console
+// line, so it is validated on this side too rather than trusted.
+func validDemoPath(p string) bool {
+	if p == "" || len(p) > 128 || strings.Contains(p, `\`) {
+		return false
+	}
+	mod, file := splitDemoPath(p)
+	if mod == "" && strings.Contains(p, "/") {
+		return false // leading slash, or more than one directory level
+	}
+	if mod != "" && !validPathSegment(mod) {
+		return false
+	}
+	return validPathSegment(file)
+}
+
+// validPathSegment is one component of a demo path: non-empty, [A-Za-z0-9._-]
+// only, never "." or "..".
+func validPathSegment(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '.' || c == '_' || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// splitDemoPath splits "<mod>/<file>" into its parts. A bare filename yields an
+// empty mod. More than one separator yields an empty mod and the whole string
+// as the file, which validDemoPath then rejects.
+func splitDemoPath(p string) (mod, file string) {
+	i := strings.Index(p, "/")
+	if i < 0 || strings.Contains(p[i+1:], "/") {
+		return "", p
+	}
+	return p[:i], p[i+1:]
+}
+
+// resolveSegmentMod returns the mod that recorded a segment and where that
+// answer came from: "field" = the client reported it outright, "directory" =
+// taken from the mod directory of the segment's demo-root-relative path.
+func resolveSegmentMod(seg DemoSegment) (mod, source string, err error) {
+	if seg.Mod != "" {
+		return seg.Mod, "field", nil
+	}
+	if m, _ := splitDemoPath(seg.Path); m != "" && validPathSegment(m) {
+		return m, "directory", nil
+	}
+	return "", "", errStr("cannot determine which mod recorded " + seg.File +
+		" -- the client reported neither a mod field nor a <mod>/<file> path" +
+		" (demo predates the per-mod demo directory); it cannot be replayed")
+}
+
+/* --------------------------- demo file addressing --------------------------- */
+
+// demoPlayArg is the string handed to the client's `wtvdemo` command: the
+// segment's path relative to the demo root, which already carries the mod
+// directory. Falls back to the bare basename, which `wtvdemo` also accepts,
+// when the client did not report a path.
+func demoPlayArg(seg DemoSegment) string {
 	if seg.Path != "" {
 		return seg.Path
 	}
-	return demoDir + "/" + seg.File
+	return seg.File
 }
 
-// demoAbsPath builds the absolute on-disk path of a demo recorded by the LIVE
-// instance: <liveHome>/<fsGame>/<relPath>. Requires both to be known.
-// CL_PlayDemo_f opens an absolute path (with .dm_84 extension) directly via
-// FS_FOpenFileReadFullDir, so the replay instance -- which runs under a
-// different fs_homepath -- can still load it with no copy.
-func demoAbsPath(liveHome, fsGame, relPath string) (string, error) {
-	if liveHome == "" || fsGame == "" {
-		return "", errStr("live homepath / fs_game unknown -- set live_homepath and fs_game (or +set them in et_args) so the replay instance can locate demos")
+// demoAbsPath is the on-disk path of a demo, used only to check that the file
+// is still there before starting a replay. The client writes demos into one
+// root under fs_homepath (cl_wtvDemoPath) with one sub-directory per mod, and
+// both instances share that homepath:
+//
+//	<live_homepath>/<replay_demo_dir>/<mod>/<file>
+//
+// relPath is that "<mod>/<file>" part. Its separator is a forward slash (it
+// comes from the engine), so it is converted before being joined -- see
+// TestDemoAbsPathOnDisk, which checks the result really stats on this platform.
+func demoAbsPath(liveHome, demoDir, relPath string) (string, error) {
+	if liveHome == "" {
+		return "", errStr("live homepath unknown -- set live_homepath (or +set fs_homepath in et_args) so the agent can find demos")
 	}
-	p := filepath.Join(liveHome, fsGame, filepath.FromSlash(relPath))
-	abs, err := filepath.Abs(p)
+	if demoDir == "" {
+		demoDir = "wtvdemos"
+	}
+	abs, err := filepath.Abs(filepath.Join(liveHome,
+		filepath.FromSlash(demoDir), filepath.FromSlash(relPath)))
 	if err != nil {
 		return "", err
 	}
 	return abs, nil
 }
 
-// demoLoadCommand is the console command that loads a demo by absolute path.
-// The path is quoted so spaces survive the console tokenizer; the tokenizer
-// strips the quotes before Sys_PathAbsolute sees the C:\ prefix.
-func demoLoadCommand(absPath string) string {
-	return `demo "` + absPath + `"`
+// demoLoadCommand is the console command that loads a demo on the replay
+// instance. `wtvdemo` reads from the flat demo root, bypassing the
+// fs_game-relative lookup that plain `demo` does.
+func demoLoadCommand(relPath string) string {
+	return "wtvdemo " + relPath
 }
 
-// buildReplayArgs derives the replay instance's ET args from the live args:
-// same video/config, but its own fs_homepath, cl_wtvPort and window title, and
-// demo recording forced OFF (the replay instance must never record). Any
-// +connect from the live args is dropped -- the replay instance joins nothing.
-func buildReplayArgs(base []string, homepath, title string, port int) []string {
-	out := stripArg(base, "+connect")          // never auto-connect
-	out = setArg(out, "fs_homepath", homepath) // isolated homepath
+/* ---------------------------- replay instance args -------------------------- */
+
+// replayForcedCvars are the cvars the replay instance overrides on its own
+// command line. They are also the ones it can leak into the SHARED config file
+// (see sharedHomepathRisks) if the live instance does not set them itself.
+var replayForcedCvars = []string{"cl_wtvDemo", "cl_wtvFallback", "s_initsound", "db_mode"}
+
+// buildReplayArgs derives the replay instance's ET args from the live args.
+//
+// The replay instance runs under the SAME fs_homepath as the live instance --
+// that is not a convenience, it is a requirement: a demo only plays if the
+// client can see the same pk3s (maps + mod) the live instance downloaded, and
+// those live in the live homepath. An empty separate homepath fails playback
+// with a checksum error. The two are separated by ET profile instead.
+//
+// fs_game is the MOD THAT RECORDED THE DEMO, not the live one.
+func buildReplayArgs(base []string, homepath, mod, profile, title string, port int) []string {
+	out := stripArg(base, "+connect") // never auto-connect
+	out = setArg(out, "fs_homepath", homepath)
+	out = setArg(out, "fs_game", mod) // demos are only playable by their own mod
 	out = setArg(out, "cl_wtvPort", fmt.Sprintf("%d", port))
 	out = setArg(out, "cl_wtvTitle", title)
-	out = setArg(out, "cl_wtvDemo", "0")   // never record on the replay instance
+	out = setArg(out, "cl_wtvDemo", "0")     // never record on the replay instance
 	out = setArg(out, "cl_wtvFallback", "0") // no fallback director on replay
+	// Sharing the homepath means sharing files. Keep the replay instance from
+	// touching the ones the live instance owns:
+	out = setArg(out, "s_initsound", "0") // no second process fighting for the audio device
+	out = setArg(out, "db_mode", "1")     // in-memory DB, do not open the shared etl.db
+	out = setArg(out, "logfile", "0")     // etconsole.log is opened truncating -- would eat live's log
+	if profile != "" {
+		// cl_profile moves the startup config exec and the profile.pid out of
+		// the way; com_pidfile is set explicitly because cl_profile is CVAR_ROM
+		// and gets reset to "" once CL_Init registers it (see README).
+		out = setArg(out, "cl_profile", profile)
+		out = setArg(out, "com_pidfile", "profiles/"+profile+"/profile.pid")
+	}
 	return out
+}
+
+// sharedHomepathRisks lists the cvars the replay instance forces that the live
+// instance does NOT pin in et_args. Both instances write the same
+// <fs_homepath>/<fs_game>/etconfig.cfg (ET writes the config from Com_Frame
+// whenever an archived cvar changes, and cl_profile is empty at that point), so
+// a value forced here can end up in the file the live instance reads on its
+// next start. Pinning it in et_args makes the live instance immune: command
+// line +set is applied AFTER the config is exec'd.
+func sharedHomepathRisks(etArgs []string) []string {
+	var out []string
+	for _, k := range replayForcedCvars {
+		if argValue(etArgs, k) == "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+/* ------------------------ warm-instance mod decision ------------------------ */
+
+type instanceAction int
+
+const (
+	instReuse   instanceAction = iota // warm instance already runs the right mod
+	instStart                         // nothing running -- cold start
+	instRestart                       // running the wrong mod -- must be restarted
+)
+
+func (a instanceAction) String() string {
+	switch a {
+	case instReuse:
+		return "reuse"
+	case instStart:
+		return "start"
+	default:
+		return "restart"
+	}
+}
+
+// replayInstanceAction decides what to do with the warm replay instance for a
+// demo recorded by wantMod. A warm instance is NEVER reused across mods: its
+// fs_game is fixed at launch, and loading a foreign demo would restart the
+// filesystem mid-playback (or simply fail to find the mod's pk3s).
+func replayInstanceAction(running bool, curMod, wantMod string) instanceAction {
+	if !running {
+		return instStart
+	}
+	if !strings.EqualFold(curMod, wantMod) {
+		return instRestart
+	}
+	return instReuse
 }
 
 // setArg sets `+set <key> <val>` in an ET arg list, replacing an existing value
@@ -258,11 +425,25 @@ type highlightView struct {
 	SvTime   int    `json:"svtime"`
 	OffsetMs int    `json:"offset_ms"`
 	Label    string `json:"label"`
+	// Camera context (Part 1). Replayable is false when the live camera was not
+	// on the subject: the panel greys out the Play button for those, and the
+	// auto-director never picks them.
+	Replayable   bool   `json:"replayable"`
+	Followed     string `json:"followed,omitempty"`
+	FollowedSlot int    `json:"followed_slot"`
 }
 
 type segmentView struct {
-	File       string          `json:"file"`
-	Map        string          `json:"map"`
+	File string `json:"file"`
+	// Path is the demo-root-relative "<mod>/<file>" the client reported, i.e.
+	// what `wtvdemo` is given verbatim.
+	Path string `json:"path,omitempty"`
+	Map  string `json:"map"`
+	// Mod is the fs_game that recorded the demo -- the replay instance must run
+	// it to play the demo back. "" means it could not be determined and the
+	// segment is not replayable (mod_source says why).
+	Mod        string          `json:"mod"`
+	ModSource  string          `json:"mod_source"` // field|directory|unknown
 	StartSv    int             `json:"seg_start_svtime"`
 	EndSv      int             `json:"seg_end_svtime"`
 	Highlights []highlightView `json:"highlights"`
@@ -274,8 +455,13 @@ func segmentViews(segs []DemoSegment, hls []Highlight) []segmentView {
 	out := make([]segmentView, 0, len(segs))
 	for i := len(segs) - 1; i >= 0; i-- { // newest first
 		seg := segs[i]
+		mod, source, err := resolveSegmentMod(seg)
+		if err != nil {
+			source = "unknown"
+		}
 		sv := segmentView{
-			File: seg.File, Map: seg.Map,
+			File: seg.File, Path: seg.Path, Map: seg.Map,
+			Mod: mod, ModSource: source,
 			StartSv: seg.StartSv, EndSv: seg.EndSv,
 			Highlights: []highlightView{},
 		}
@@ -285,9 +471,12 @@ func segmentViews(segs []DemoSegment, hls []Highlight) []segmentView {
 			}
 			sv.Highlights = append(sv.Highlights, highlightView{
 				Kind: h.Kind, Player: h.Player, Score: h.Score,
-				SvTime:   h.SvTime,
-				OffsetMs: offsetFromSvtime(h.SvTime, seg.StartSv),
-				Label:    highlightLabel(h),
+				SvTime:       h.SvTime,
+				OffsetMs:     offsetFromSvtime(h.SvTime, seg.StartSv),
+				Label:        highlightLabel(h),
+				Replayable:   h.Replayable,
+				Followed:     h.Followed,
+				FollowedSlot: h.FollowedSlot,
 			})
 		}
 		out = append(out, sv)
@@ -299,8 +488,10 @@ func segmentViews(segs []DemoSegment, hls []Highlight) []segmentView {
 
 // replayJob is the immutable description of one replay run.
 type replayJob struct {
-	file     string
-	absPath  string
+	file     string // basename, the identifier the panel and /events use
+	path     string // "<mod>/<file>" relative to the demo root, for `wtvdemo`
+	mod      string // fs_game that recorded it; the replay instance must run it
+	absPath  string // on-disk location, for the existence check and logs
 	offsetMs int
 	preMs    int
 	postMs   int
@@ -312,6 +503,7 @@ type replayController struct {
 	active    bool
 	phase     string // idle|starting|seeking|playing|returning
 	file      string
+	mod       string
 	offsetMs  int
 	startedAt int64
 	cancel    chan struct{}
@@ -331,6 +523,7 @@ func (rc *replayController) begin(job replayJob) bool {
 	rc.active = true
 	rc.phase = "starting"
 	rc.file = job.file
+	rc.mod = job.mod
 	rc.offsetMs = job.offsetMs
 	rc.startedAt = time.Now().Unix()
 	rc.cancel = make(chan struct{})
@@ -366,9 +559,11 @@ func (rc *replayController) status() map[string]any {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	instUp := false
+	instMod := ""
 	if rp != nil {
 		rp.mu.Lock()
 		instUp = rp.etCmd != nil && rp.pipeUp
+		instMod = rp.fsGame
 		rp.mu.Unlock()
 	}
 	phase := rc.phase
@@ -376,12 +571,14 @@ func (rc *replayController) status() map[string]any {
 		phase = "idle"
 	}
 	return map[string]any{
-		"active":      rc.active,
-		"phase":       phase,
-		"file":        rc.file,
-		"offset_ms":   rc.offsetMs,
-		"started_at":  rc.startedAt,
-		"instance_up": instUp,
+		"active":       rc.active,
+		"phase":        phase,
+		"file":         rc.file,
+		"mod":          rc.mod,
+		"offset_ms":    rc.offsetMs,
+		"started_at":   rc.startedAt,
+		"instance_up":  instUp,
+		"instance_mod": instMod,
 	}
 }
 
@@ -444,17 +641,19 @@ func (rc *replayController) run(job replayJob) {
 	rc.mu.Unlock()
 	defer rc.finish(dry)
 
-	// 1) ensure the replay instance is up and the demo is playing.
+	// 1) ensure the replay instance is up, running the mod that recorded this
+	//    demo, and that the demo is playing.
 	if !dry {
-		if err := ensureReplayUp(replayStartTimeout, cancel); err != nil {
+		if err := ensureReplayUp(job.mod, replayStartTimeout, cancel); err != nil {
 			log.Println("replay: instance not ready:", err)
 			return
 		}
 	} else {
-		log.Println("replay: [dry-run] would ensure replay instance is up")
+		log.Printf("replay: [dry-run] demo %q (mod %q, on disk %s) -- would %s the replay instance",
+			job.path, job.mod, job.absPath, dryRunInstanceAction(job.mod))
 	}
 
-	if !rc.replayExec(demoLoadCommand(job.absPath), dry) {
+	if !rc.replayExec(demoLoadCommand(job.path), dry) {
 		log.Println("replay: demo load failed (replay pipeline down)")
 		return
 	}
@@ -504,6 +703,7 @@ func (rc *replayController) finish(dry bool) {
 	rc.active = false
 	rc.phase = "idle"
 	rc.file = ""
+	rc.mod = ""
 	rc.offsetMs = 0
 	rc.cancel = nil
 	rc.lastDone = time.Now()
@@ -513,22 +713,55 @@ func (rc *replayController) finish(dry bool) {
 
 /* ------------------------ replay instance lifecycle ------------------------- */
 
-// ensureReplayUp starts the replay instance if needed and waits for its
-// pipeline hello, honouring an abort. Never affects the live instance.
-func ensureReplayUp(timeout time.Duration, cancel <-chan struct{}) error {
+// dryRunInstanceAction reports what ensureReplayUp WOULD do for a mod, without
+// touching anything -- used by the dry-run log line.
+func dryRunInstanceAction(mod string) instanceAction {
+	if rp == nil {
+		return instStart
+	}
+	rp.mu.Lock()
+	defer rp.mu.Unlock()
+	return replayInstanceAction(rp.etCmd != nil, rp.fsGame, mod)
+}
+
+// ensureReplayUp makes sure the replay instance is up AND running the mod that
+// recorded the demo, restarting it if the warm instance runs a different one,
+// then waits for its pipeline hello, honouring an abort. Never affects the live
+// instance.
+func ensureReplayUp(mod string, timeout time.Duration, cancel <-chan struct{}) error {
 	if rp == nil {
 		return errStr("replay instance not configured")
 	}
+	if mod == "" {
+		return errStr("no mod resolved for this demo -- refusing to start the replay instance")
+	}
 	rp.mu.Lock()
-	if rp.etCmd == nil {
-		args := buildReplayArgs(cfg.EtArgs, cfg.ReplayHomepath, cfg.ReplayTitle, replayPort)
-		log.Printf("replay: starting instance: %s %s", cfg.EtPath, strings.Join(args, " "))
+	switch act := replayInstanceAction(rp.etCmd != nil, rp.fsGame, mod); act {
+	case instReuse:
+		rp.mu.Unlock()
+	default:
+		if act == instRestart {
+			log.Printf("replay: warm instance runs mod %q but this demo needs %q -- restarting",
+				rp.fsGame, mod)
+			rp.kill() // PID-only; never touches the live process
+		}
+		args := buildReplayArgs(cfg.EtArgs, cfg.LiveHomepath, mod, cfg.ReplayProfile,
+			cfg.ReplayTitle, replayPort)
+		log.Printf("replay: starting instance (mod %s): %s %s", mod, cfg.EtPath, strings.Join(args, " "))
+		// Drop any state from the previous process before spawning: a stale
+		// pipeUp/tele would make the caller send `wtvdemo` into a dead socket
+		// or believe playback is already active.
+		rp.pipeUp = false
+		rp.pipeCaps = nil
+		rp.tele = Telemetry{}
+		rp.fsGame = mod
 		if err := rp.spawn(args); err != nil {
+			rp.fsGame = ""
 			rp.mu.Unlock()
 			return err
 		}
+		rp.mu.Unlock()
 	}
-	rp.mu.Unlock()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -589,6 +822,7 @@ func replayIdleMonitor() {
 			if rp.etCmd != nil {
 				log.Printf("replay: instance idle %ds -> stopping", cfg.ReplayIdleStopSec)
 				rp.kill()
+				rp.fsGame = "" // next replay cold-starts with its own demo's mod
 			}
 			rp.mu.Unlock()
 			replay.lastDone = time.Time{} // disarm; nothing to stop until the next replay
@@ -655,8 +889,22 @@ func handleReplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// locate the demo file on disk (absolute path; read directly by the client)
-	absPath, err := demoAbsPath(cfg.LiveHomepath, cfg.FsGame, demoRelPath(seg, cfg.ReplayDemoDir))
+	// which mod recorded this demo? only that mod can play it back
+	mod, modSource, err := resolveSegmentMod(seg)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	// what we hand to `wtvdemo`: "<mod>/<file>" under the demo root. It leaves
+	// here as a console argument, so it is validated on this side too.
+	relPath := demoPlayArg(seg)
+	if !validDemoPath(relPath) {
+		writeJSON(w, 400, map[string]string{"error": "refusing to load demo with an unsafe path: " + relPath})
+		return
+	}
+
+	// locate the demo on disk, under the shared homepath
+	absPath, err := demoAbsPath(cfg.LiveHomepath, cfg.ReplayDemoDir, relPath)
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
@@ -682,7 +930,7 @@ func handleReplay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := replayJob{
-		file: seg.File, absPath: absPath, offsetMs: offsetMs,
+		file: seg.File, path: relPath, mod: mod, absPath: absPath, offsetMs: offsetMs,
 		preMs: pre * 1000, postMs: post * 1000, speed: speed,
 	}
 	if !replay.begin(job) {
@@ -690,20 +938,25 @@ func handleReplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// eta based on current instance state and the seek/window math
+	// eta based on current instance state and the seek/window math. A warm
+	// instance running a different mod has to be restarted, so it costs the
+	// same as a cold start.
 	rp.mu.Lock()
 	instUp := rp.etCmd != nil && rp.pipeUp
+	action := replayInstanceAction(rp.etCmd != nil, rp.fsGame, mod)
 	rp.mu.Unlock()
 	windowStart, windowEnd := playbackWindow(offsetMs, job.preMs, job.postMs)
 	ffTarget := fastForwardUntilMs(windowStart, seekMarginMs)
-	eta := etaSeconds(instUp, ffTarget, cfg.ReplaySeekTimescale, windowEnd-windowStart, speed)
+	eta := etaSeconds(instUp && action == instReuse, ffTarget, cfg.ReplaySeekTimescale,
+		windowEnd-windowStart, speed)
 
 	go replay.run(job)
 
-	log.Printf("replay: accepted %s offset %dms (pre %ds post %ds speed %.2f) eta %ds",
-		seg.File, offsetMs, pre, post, speed, eta)
+	log.Printf("replay: accepted %s (mod %s via %s, instance: %s) offset %dms (pre %ds post %ds speed %.2f) eta %ds",
+		relPath, mod, modSource, action, offsetMs, pre, post, speed, eta)
 	writeJSON(w, 200, map[string]any{
-		"ok": true, "file": seg.File, "offset_ms": offsetMs, "eta_sec": eta,
+		"ok": true, "file": seg.File, "path": relPath, "mod": mod, "mod_source": modSource,
+		"instance_action": action.String(), "offset_ms": offsetMs, "eta_sec": eta,
 	})
 }
 
@@ -737,21 +990,31 @@ func setupReplay() {
 		cfg.ReplayEnabled = false
 		return
 	}
-	if cfg.ReplayHomepath == "" {
-		log.Println("replay: DISABLED -- replay_homepath is required")
+	// The replay instance MUST share the live homepath: that is where the pk3s
+	// (maps + mod) the demos reference were downloaded to. Without them
+	// playback dies with a checksum error, so an unknown live homepath is fatal
+	// to the replay path -- but never to the live broadcast.
+	if cfg.LiveHomepath == "" {
+		log.Println("replay: DISABLED -- live_homepath is unknown (set it, or +set fs_homepath in et_args)")
 		cfg.ReplayEnabled = false
 		return
 	}
 	replayPort = port
 	rp = &instance{
 		name:       "replay",
-		homepath:   cfg.ReplayHomepath,
+		homepath:   cfg.LiveHomepath, // shared with live, on purpose
 		pipeAddr:   cfg.ReplayPipeAddr,
 		directs:    false, // the replay orchestrator drives the camera, not the director
 		feedEvents: false, // replayed demos must NOT pollute the live event feed
 	}
 	go rp.pipeLoop()
 	go replayIdleMonitor()
-	log.Printf("replay: enabled -- instance pipe %s, homepath %s, dry_run %v",
-		cfg.ReplayPipeAddr, cfg.ReplayHomepath, cfg.DryRun)
+	log.Printf("replay: enabled -- instance pipe %s, shared homepath %s, profile %s, demo dir %s, dry_run %v",
+		cfg.ReplayPipeAddr, cfg.LiveHomepath, cfg.ReplayProfile, cfg.ReplayDemoDir, cfg.DryRun)
+	if risks := sharedHomepathRisks(cfg.EtArgs); len(risks) > 0 {
+		log.Printf("replay: NOTE both instances write the same etconfig.cfg (cl_profile is CVAR_ROM "+
+			"and is empty by the time ET writes the config). The replay instance forces %s; "+
+			"pin them in et_args (+set ...) so the live instance is not affected by what the "+
+			"replay instance persists.", strings.Join(risks, ", "))
+	}
 }

@@ -46,7 +46,11 @@ type pipeMsg struct {
 	Victim   string `json:"victim,omitempty"`
 	Weapon   string `json:"weapon,omitempty"`
 	Text     string `json:"text,omitempty"`
-	File string `json:"file,omitempty"`
+	File     string `json:"file,omitempty"`
+	// absolute client numbers the client resolves for kills; nil for events
+	// (selfkill omits attacker_slot) that carry no such slot.
+	AttackerSlot *int `json:"attacker_slot,omitempty"`
+	VictimSlot   *int `json:"victim_slot,omitempty"`
 
 	Telemetry
 }
@@ -103,9 +107,21 @@ func (in *instance) pipeLoop() {
 					in.name, m.Version, m.Proto, m.Caps)
 			case "action":
 				if in.feedEvents {
+					// Capture the camera context at the instant the action lands:
+					// who the (live, directed) instance is following right now. A
+					// demo can only replay a highlight if the camera was on the
+					// player who made it, so this is what decides replayable. in ==
+					// st here (only the directed live instance feeds events) and
+					// in.mu is held, so curTarget/curTargetSlot are consistent.
+					aslot := -1
+					if m.AttackerSlot != nil {
+						aslot = *m.AttackerSlot
+					}
 					feed.addAction(ActionEvent{
 						Kind: m.Kind, SvTime: m.SvTime, Attacker: m.Attacker,
 						Victim: m.Victim, Weapon: m.Weapon, Text: m.Text,
+						AttackerSlot: aslot,
+						Followed:     in.curTarget, FollowedSlot: in.curTargetSlot,
 						Server: in.currentServer, Map: in.tele.Map,
 					})
 				}
@@ -132,13 +148,15 @@ func (in *instance) pipeLoop() {
 			case "demo":
 				// parse demo events separately: they reuse the "state" json
 				// key (start/stop) which collides with the telemetry state,
-				// and carry seg_start_svtime/seg_end_svtime plus the
-				// game-relative "path" the replay instance loads by.
+				// and carry seg_start_svtime/seg_end_svtime plus the "mod"
+				// (fs_game) that recorded the demo -- only that mod can play
+				// it back, so the replay instance is launched with it.
 				if in.feedEvents {
 					var d struct {
 						State   string `json:"state"`
 						File    string `json:"file"`
 						Path    string `json:"path"`
+						Mod     string `json:"mod"`
 						Map     string `json:"map"`
 						StartSv int    `json:"seg_start_svtime"`
 						EndSv   int    `json:"seg_end_svtime"`
@@ -146,8 +164,8 @@ func (in *instance) pipeLoop() {
 					if json.Unmarshal(sc.Bytes(), &d) == nil {
 						if d.State == "start" || d.State == "segment" {
 							feed.addSegment(DemoSegment{File: d.File, Path: d.Path,
-								Map: d.Map, StartSv: d.StartSv})
-							log.Printf("demo: segment start %s (svtime %d)", d.File, d.StartSv)
+								Mod: d.Mod, Map: d.Map, StartSv: d.StartSv})
+							log.Printf("demo: segment start %s (mod %q, svtime %d)", d.File, d.Mod, d.StartSv)
 						} else if d.State == "stop" || d.State == "stopped" {
 							feed.closeSegment(d.File, d.EndSv)
 							log.Printf("demo: segment stop %s (svtime %d)", d.File, d.EndSv)

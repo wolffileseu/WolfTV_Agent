@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -118,35 +120,199 @@ func TestPortFromAddr(t *testing.T) {
 	}
 }
 
-func TestDemoRelPath(t *testing.T) {
-	withPath := DemoSegment{File: "wtv_supply_100.dm_84", Path: "wtvdemos/wtv_supply_100.dm_84"}
-	if got := demoRelPath(withPath, "wtvdemos"); got != "wtvdemos/wtv_supply_100.dm_84" {
-		t.Fatalf("relpath = %q", got)
+func TestSplitDemoPath(t *testing.T) {
+	cases := []struct {
+		p, mod, file string
+	}{
+		{"silent/wtv_oasis_1.dm_84", "silent", "wtv_oasis_1.dm_84"},
+		{"wtv_oasis_1.dm_84", "", "wtv_oasis_1.dm_84"},
+		{"a/b/c.dm_84", "", "a/b/c.dm_84"}, // too deep: no split, rejected by validDemoPath
+		{"/x.dm_84", "", "x.dm_84"},        // leading slash -> empty mod
 	}
-	// fall back to <demoDir>/<file> when the engine did not report a path
-	noPath := DemoSegment{File: "wtv_supply_100.dm_84"}
-	if got := demoRelPath(noPath, "customdemos"); got != "customdemos/wtv_supply_100.dm_84" {
-		t.Fatalf("relpath = %q", got)
+	for _, c := range cases {
+		mod, file := splitDemoPath(c.p)
+		if mod != c.mod || file != c.file {
+			t.Errorf("splitDemoPath(%q) = (%q,%q), want (%q,%q)", c.p, mod, file, c.mod, c.file)
+		}
+	}
+}
+
+func TestResolveSegmentMod(t *testing.T) {
+	// 1) the client reported the mod -- always wins
+	seg := DemoSegment{File: "wtv_oasis_1.dm_84", Path: "silent/wtv_oasis_1.dm_84", Mod: "silent"}
+	mod, src, err := resolveSegmentMod(seg)
+	if err != nil || mod != "silent" || src != "field" {
+		t.Fatalf("reported mod = (%q,%q,%v), want (silent,field,nil)", mod, src, err)
+	}
+	// the field wins even if the path disagrees (the client is authoritative)
+	seg = DemoSegment{File: "wtv_oasis_1.dm_84", Path: "etpub/wtv_oasis_1.dm_84", Mod: "silent"}
+	if mod, src, _ = resolveSegmentMod(seg); mod != "silent" || src != "field" {
+		t.Fatalf("field should win, got (%q,%q)", mod, src)
+	}
+	// 2) no field -> the mod directory of the reported path
+	seg = DemoSegment{File: "wtv_te_escape2_42.dm_84", Path: "no_quarter/wtv_te_escape2_42.dm_84"}
+	mod, src, err = resolveSegmentMod(seg)
+	if err != nil || mod != "no_quarter" || src != "directory" {
+		t.Fatalf("path mod = (%q,%q,%v), want (no_quarter,directory,nil)", mod, src, err)
+	}
+	// 3) neither -> a clear error, and no guessed mod. A bare path carries no
+	//    mod, and the filename is NOT parsed: wtv_<map>_<svtime> has no mod in it.
+	for _, bad := range []DemoSegment{
+		{File: "wtv_supply_42.dm_84"},
+		{File: "wtv_supply_42.dm_84", Path: "wtv_supply_42.dm_84"},
+		{File: "wtv_supply_42.dm_84", Path: "../wtv_supply_42.dm_84"},
+	} {
+		mod, src, err = resolveSegmentMod(bad)
+		if err == nil {
+			t.Errorf("%+v: expected an error when no mod is reported", bad)
+		}
+		if mod != "" || src != "" {
+			t.Errorf("%+v: got (%q,%q), want empty on error", bad, mod, src)
+		}
+	}
+	if _, _, err = resolveSegmentMod(DemoSegment{File: "wtv_supply_42.dm_84"}); err == nil ||
+		!strings.Contains(err.Error(), "wtv_supply_42.dm_84") {
+		t.Errorf("error should name the demo, got %v", err)
+	}
+}
+
+func TestReplayInstanceAction(t *testing.T) {
+	cases := []struct {
+		name    string
+		running bool
+		cur     string
+		want    string
+		action  instanceAction
+	}{
+		{"cold start", false, "", "silent", instStart},
+		{"cold start, stale mod recorded", false, "silent", "silent", instStart},
+		{"warm, same mod", true, "silent", "silent", instReuse},
+		{"warm, same mod different case", true, "Silent", "silent", instReuse},
+		{"warm, other mod -> restart", true, "silent", "etpub", instRestart},
+		{"warm, mod unknown -> restart", true, "", "silent", instRestart},
+	}
+	for _, c := range cases {
+		if got := replayInstanceAction(c.running, c.cur, c.want); got != c.action {
+			t.Errorf("%s: action = %v, want %v", c.name, got, c.action)
+		}
+	}
+}
+
+func TestDemoLoadCommand(t *testing.T) {
+	// the demo-root-relative path, loaded through wtvdemo (NOT `demo`, which is
+	// fs_game-relative and would never find a demo recorded under another mod)
+	if got := demoLoadCommand("silent/wtv_supply_1.dm_84"); got != "wtvdemo silent/wtv_supply_1.dm_84" {
+		t.Fatalf("load command = %q", got)
+	}
+}
+
+func TestDemoPlayArg(t *testing.T) {
+	// the reported path is passed through verbatim
+	seg := DemoSegment{File: "wtv_supply_1.dm_84", Path: "silent/wtv_supply_1.dm_84"}
+	if got := demoPlayArg(seg); got != "silent/wtv_supply_1.dm_84" {
+		t.Errorf("play arg = %q, want the reported path", got)
+	}
+	// no path reported -> the bare basename, which wtvdemo also accepts
+	seg = DemoSegment{File: "wtv_supply_1.dm_84"}
+	if got := demoPlayArg(seg); got != "wtv_supply_1.dm_84" {
+		t.Errorf("play arg = %q, want the basename", got)
+	}
+}
+
+func TestValidDemoPath(t *testing.T) {
+	ok := []string{
+		"silent/wtv_supply_1.dm_84",         // <mod>/<file>
+		"wtv_supply_1.dm_84",                // bare filename
+		"no_quarter/wtv_te_escape2_9.dm_84", // underscores in both segments
+		"a-b/c-d.dm_84",
+	}
+	bad := []string{
+		"", ".", "..",
+		"a/b/c.dm_84",         // more than one directory level
+		"../etconfig.cfg",     // traversal
+		"silent/../../secret", // traversal inside a segment
+		"/x.dm_84",            // absolute
+		`C:\demos\x.dm_84`,    // drive letter + backslashes
+		`silent\wtv_x.dm_84`,  // backslash separator
+		"silent/",             // empty file segment
+		"/silent/x.dm_84",     // leading slash
+		"x.dm_84; quit",       // console metacharacters
+		"x.dm_84\nquit",
+		"wtv x.dm_84", // space
+	}
+	for _, f := range ok {
+		if !validDemoPath(f) {
+			t.Errorf("validDemoPath(%q) = false, want true", f)
+		}
+	}
+	for _, f := range bad {
+		if validDemoPath(f) {
+			t.Errorf("validDemoPath(%q) = true, want false", f)
+		}
 	}
 }
 
 func TestDemoAbsPath(t *testing.T) {
-	// missing homepath/fsgame is an error (agent can't locate demos)
-	if _, err := demoAbsPath("", "silent", "wtvdemos/x.dm_84"); err == nil {
+	// an unknown live homepath is an error (agent cannot find demos at all)
+	if _, err := demoAbsPath("", "wtvdemos", "silent/x.dm_84"); err == nil {
 		t.Fatal("expected error for empty live homepath")
 	}
-	if _, err := demoAbsPath("/home/live", "", "wtvdemos/x.dm_84"); err == nil {
-		t.Fatal("expected error for empty fs_game")
-	}
-	abs, err := demoAbsPath(string(filepath.Separator)+"live", "silent", "wtvdemos/x.dm_84")
+	// <live_homepath>/<replay_demo_dir>/<mod>/<file>
+	abs, err := demoAbsPath(string(filepath.Separator)+"live", "wtvdemos", "silent/wtv_supply_1.dm_84")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !filepath.IsAbs(abs) {
 		t.Fatalf("path %q is not absolute", abs)
 	}
-	if !strings.Contains(abs, "silent") || !strings.HasSuffix(abs, "x.dm_84") {
-		t.Fatalf("path %q missing expected components", abs)
+	// (filepath.Abs qualifies a rooted path with the current drive on Windows)
+	want, _ := filepath.Abs(filepath.Join(string(filepath.Separator)+"live", "wtvdemos", "silent", "wtv_supply_1.dm_84"))
+	if abs != want {
+		t.Fatalf("path = %q, want %q", abs, want)
+	}
+	// the forward slash from the engine must not survive into the OS path
+	if filepath.Separator != '/' && strings.Contains(abs, "/") {
+		t.Errorf("path %q still contains a forward slash", abs)
+	}
+	// empty demo dir falls back to the client default
+	abs, _ = demoAbsPath(string(filepath.Separator)+"live", "", "silent/x.dm_84")
+	if !strings.Contains(abs, "wtvdemos") {
+		t.Fatalf("default demo dir missing from %q", abs)
+	}
+}
+
+// TestDemoAbsPathOnDisk is the check that matters on the streaming host: the
+// path the agent builds from a client-reported "<mod>/<file>" -- which uses a
+// forward slash on every platform -- must actually stat. Run under the Windows
+// toolchain this exercises real Windows path handling instead of assuming
+// filepath normalises the separator.
+func TestDemoAbsPathOnDisk(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "wtvdemos", "silent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	name := "wtv_axislab_final_45318300.dm_84"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("demo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	abs, err := demoAbsPath(home, "wtvdemos", "silent/"+name)
+	if err != nil {
+		t.Fatalf("demoAbsPath: %v", err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		t.Fatalf("stat %q (built from a forward-slash path): %v", abs, err)
+	}
+	t.Logf("%s: resolved and stat'd %q", runtime.GOOS, abs)
+
+	// a demo whose mod directory does not exist must be reported missing
+	other, err := demoAbsPath(home, "wtvdemos", "jaymod/"+name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(other); err == nil {
+		t.Fatalf("%q should not stat", other)
 	}
 }
 
@@ -179,25 +345,64 @@ func TestBuildReplayArgs(t *testing.T) {
 		"+set", "fs_game", "silent",
 		"+connect", "1.2.3.4:27960",
 	}
-	got := buildReplayArgs(base, "C:\\Stream\\replayhome", "WolfTV-Replay", 8791)
+	got := buildReplayArgs(base, "C:\\Stream\\livehome", "etpub", "wolftv-replay", "WolfTV-Replay", 8791)
 	joined := strings.Join(got, " ")
 
 	// the replay instance must not auto-connect
 	if strings.Contains(joined, "+connect") {
 		t.Errorf("replay args still contain +connect: %v", got)
 	}
-	// its own port, title, homepath and recording OFF
+	// its own port, title and recording OFF
 	assertArg(t, got, "cl_wtvPort", "8791")
 	assertArg(t, got, "cl_wtvTitle", "WolfTV-Replay")
-	assertArg(t, got, "fs_homepath", "C:\\Stream\\replayhome")
 	assertArg(t, got, "cl_wtvDemo", "0")
+	// the SHARED homepath -- the replay instance needs the live instance's pk3s
+	assertArg(t, got, "fs_homepath", "C:\\Stream\\livehome")
+	// ...and the mod of the DEMO, not the live one
+	assertArg(t, got, "fs_game", "etpub")
+	// separated from live by profile, with an explicit pid file (cl_profile is
+	// CVAR_ROM and does not survive CL_Init)
+	assertArg(t, got, "cl_profile", "wolftv-replay")
+	assertArg(t, got, "com_pidfile", "profiles/wolftv-replay/profile.pid")
+	// shared-homepath guards
+	assertArg(t, got, "s_initsound", "0")
+	assertArg(t, got, "db_mode", "1")
+	assertArg(t, got, "logfile", "0")
 	// unrelated args are preserved
-	assertArg(t, got, "fs_game", "silent")
+	assertArg(t, got, "r_mode", "-1")
 
 	// the base slice must not be mutated out from under the caller in a way
-	// that corrupts the live args (cl_wtvPort stays live's value)
+	// that corrupts the live args (cl_wtvPort and fs_game stay live's values)
 	if base[5] != "8790" {
 		t.Errorf("base cl_wtvPort mutated to %q", base[5])
+	}
+	if base[11] != "silent" {
+		t.Errorf("base fs_game mutated to %q", base[11])
+	}
+}
+
+func TestSharedHomepathRisks(t *testing.T) {
+	// live pins nothing -> every forced cvar is a risk
+	if got := sharedHomepathRisks(nil); len(got) != len(replayForcedCvars) {
+		t.Fatalf("risks = %v, want all of %v", got, replayForcedCvars)
+	}
+	// live pins them all -> nothing to warn about
+	var pinned []string
+	for _, k := range replayForcedCvars {
+		pinned = append(pinned, "+set", k, "1")
+	}
+	if got := sharedHomepathRisks(pinned); len(got) != 0 {
+		t.Fatalf("risks = %v, want none", got)
+	}
+	// partial: only the unpinned ones are reported
+	got := sharedHomepathRisks([]string{"+set", "cl_wtvDemo", "1", "+set", "s_initsound", "1"})
+	for _, k := range got {
+		if k == "cl_wtvDemo" || k == "s_initsound" {
+			t.Errorf("pinned cvar %q reported as a risk", k)
+		}
+	}
+	if len(got) != len(replayForcedCvars)-2 {
+		t.Fatalf("risks = %v, want %d entries", got, len(replayForcedCvars)-2)
 	}
 }
 
@@ -221,21 +426,35 @@ func TestHighlightLabel(t *testing.T) {
 
 func TestSegmentViews(t *testing.T) {
 	segs := []DemoSegment{
-		{File: "old.dm_84", Map: "supply", StartSv: 0, EndSv: 10000},
-		{File: "new.dm_84", Map: "goldrush", StartSv: 20000, EndSv: 30000},
+		// pre-change segment: no mod field, no mod directory -> unknowable
+		{File: "wtv_supply_0.dm_84", Map: "supply", StartSv: 0, EndSv: 10000},
+		// current segment: the mod is the directory of the reported path
+		{File: "wtv_goldrush_20000.dm_84", Path: "silent/wtv_goldrush_20000.dm_84",
+			Map: "goldrush", StartSv: 20000, EndSv: 30000},
 	}
 	hls := []Highlight{
-		{Kind: "multikill", Count: 3, Player: "Rob", SvTime: 5000, Score: 9},   // in old
-		{Kind: "dynamite", SvTime: 25000, Score: 8},                            // in new
-		{Kind: "objective", Player: "Ann", SvTime: 99999, Score: 5},            // in neither
+		{Kind: "multikill", Count: 3, Player: "Rob", SvTime: 5000, Score: 9}, // in old
+		{Kind: "dynamite", SvTime: 25000, Score: 8},                          // in new
+		{Kind: "objective", Player: "Ann", SvTime: 99999, Score: 5},          // in neither
 	}
 	views := segmentViews(segs, hls)
 	if len(views) != 2 {
 		t.Fatalf("want 2 views, got %d", len(views))
 	}
 	// newest first
-	if views[0].File != "new.dm_84" {
-		t.Fatalf("views[0] = %s, want new.dm_84 (newest first)", views[0].File)
+	if views[0].File != "wtv_goldrush_20000.dm_84" {
+		t.Fatalf("views[0] = %s, want the newest segment first", views[0].File)
+	}
+	// each segment carries the mod needed to replay it, and where it came from
+	if views[0].Mod != "silent" || views[0].ModSource != "directory" {
+		t.Errorf("views[0] mod = (%q,%q), want (silent,directory)", views[0].Mod, views[0].ModSource)
+	}
+	// ...and the path handed to wtvdemo verbatim
+	if views[0].Path != "silent/wtv_goldrush_20000.dm_84" {
+		t.Errorf("views[0] path = %q", views[0].Path)
+	}
+	if views[1].Mod != "" || views[1].ModSource != "unknown" {
+		t.Errorf("views[1] mod = (%q,%q), want (,unknown)", views[1].Mod, views[1].ModSource)
 	}
 	if len(views[0].Highlights) != 1 || views[0].Highlights[0].Kind != "dynamite" {
 		t.Fatalf("new segment highlights = %+v", views[0].Highlights)
@@ -284,7 +503,8 @@ func TestReplayRunDryRun(t *testing.T) {
 
 	replay = replayController{}
 	job := replayJob{
-		file: "wtv_supply_1.dm_84", absPath: "C:\\live\\silent\\wtvdemos\\wtv_supply_1.dm_84",
+		file: "wtv_supply_1.dm_84", path: "silent/wtv_supply_1.dm_84", mod: "silent",
+		absPath:  "C:\\live\\wtvdemos\\silent\\wtv_supply_1.dm_84",
 		offsetMs: 45000, preMs: 8000, postMs: 5000, speed: 0.4,
 	}
 
@@ -321,7 +541,8 @@ func TestReplayAbortReturnsToLive(t *testing.T) {
 	cfg.SceneReplay = "Replay"
 
 	replay = replayController{}
-	job := replayJob{file: "x.dm_84", absPath: "C:\\x.dm_84", offsetMs: 45000, preMs: 8000, postMs: 5000, speed: 0.4}
+	job := replayJob{file: "x.dm_84", path: "silent/x.dm_84", mod: "silent",
+		absPath: "C:\\x.dm_84", offsetMs: 45000, preMs: 8000, postMs: 5000, speed: 0.4}
 	if !replay.begin(job) {
 		t.Fatal("begin failed")
 	}

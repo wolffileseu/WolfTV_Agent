@@ -4,7 +4,8 @@
 
   "et_path": "C:\\Stream\\ETLegacy\\wolftv.exe",
   "et_exe_name": "wolftv.exe",
-  "et_args": ["+set", "fs_homepath", "C:\\Stream\\livehome", "+set", "fs_game", "silent", "+set", "cl_wtvPort", "8790", "+set", "cl_wtvTitle", "WolfTV-1", "+set", "cl_wtvDemo", "1"],
+  "_comment_et_args": "Pin every cvar the live instance depends on here: command-line +set is applied AFTER the config file is exec'd, which makes the live instance immune to what the replay instance (same homepath, same etconfig.cfg) persists. s_initsound / cl_wtvFallback / db_mode are pinned for exactly that reason -- the replay instance forces them to 0/0/1.",
+  "et_args": ["+set", "fs_homepath", "C:\\Stream\\livehome", "+set", "fs_game", "silent", "+set", "cl_wtvPort", "8790", "+set", "cl_wtvTitle", "WolfTV-1", "+set", "cl_wtvDemo", "1", "+set", "cl_wtvFallback", "1", "+set", "s_initsound", "1", "+set", "db_mode", "2"],
 
   "obs_path": "C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe",
   "obs_addr": "127.0.0.1:4455",
@@ -28,10 +29,11 @@
 
   "_comment_replay": "Second ET instance that plays recorded demos while the live instance keeps streaming. Everything below is inert unless replay_enabled is true; a replay failure never touches the live broadcast. Fields prefixed with _comment are ignored by the parser (JSON has no comments).",
   "replay_enabled": true,
-  "_comment_replay_homepath": "fs_homepath for the replay instance -- MUST differ from the live homepath so the two processes never share config/download state.",
-  "replay_homepath": "C:\\Stream\\replayhome",
+  "_comment_replay_homepath": "There is no replay_homepath any more. The replay instance runs under the SAME fs_homepath as the live instance -- that is where the maps and the mod pk3s the demos reference were downloaded to; a separate, empty homepath fails playback with a checksum error. The two are separated by ET profile (replay_profile) instead.",
   "_comment_replay_pipe_addr": "The replay instance's own cl_wtvPort control pipe (different port from pipe_addr).",
   "replay_pipe_addr": "127.0.0.1:8791",
+  "_comment_replay_profile": "cl_profile for the replay instance: keeps its profile.pid and its startup config exec out of the live instance's way inside the shared homepath.",
+  "replay_profile": "wolftv-replay",
   "_comment_replay_idle_stop_sec": "Keep the replay instance warm this long after a replay finishes (ET start is slow), then stop it.",
   "replay_idle_stop_sec": 300,
   "_comment_replay_window": "Seconds of demo shown before/after the highlight, and the slow-motion playback speed (timescale, <1 = slow-mo).",
@@ -41,9 +43,8 @@
   "_comment_replay_seek_timescale": "Fast-forward timescale used to seek to the highlight before dropping into slow motion.",
   "replay_seek_timescale": 8,
   "replay_title": "WolfTV-Replay",
-  "_comment_replay_locate": "The replay instance loads demos recorded by the live instance by ABSOLUTE path (read directly, no copy). To build that path the agent needs the live homepath, fs_game and the demo sub-dir. live_homepath and fs_game auto-detect from et_args (+set fs_homepath / +set fs_game); set them here if they are not in et_args. replay_demo_dir must match cl_wtvDemoDir (default wtvdemos).",
+  "_comment_replay_locate": "The client writes demos into ONE root under fs_homepath, one sub-directory per mod (<root>/<mod>/wtv_<map>_<svtime>.dm_84), and loads them back with 'wtvdemo <mod>/<file>'. replay_demo_dir must match the client's cl_wtvDemoPath (default wtvdemos). live_homepath auto-detects from et_args (+set fs_homepath) and is also the homepath the replay instance runs under; set it here if it is not in et_args. There is no fs_game field any more: each demo segment reports the mod that recorded it (as its own field and as the directory of the reported path), and the replay instance is launched with THAT mod (restarted if the warm instance runs a different one).",
   "live_homepath": "",
-  "fs_game": "",
   "replay_demo_dir": "wtvdemos",
   "_comment_dry_run": "Exercise the whole replay orchestration WITHOUT spawning ET or touching OBS (every command/scene-cut/wait is logged). Also settable with the -dry-run CLI flag.",
   "dry_run": false

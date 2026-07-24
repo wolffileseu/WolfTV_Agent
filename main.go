@@ -21,13 +21,17 @@ import (
 // failure can never disturb the live broadcast.
 type instance struct {
 	name       string // "live" | "replay" (logs only)
-	homepath   string // fs_homepath; "" = ET default (live) or replay_homepath
+	homepath   string // fs_homepath; the replay instance shares the live one
 	pipeAddr   string // this instance's cl_wtvPort pipe address
 	directs    bool   // run the auto-director against this instance
 	feedEvents bool   // feed this instance's actions/demos into the event feed
 
-	mu            sync.Mutex
-	etCmd         *exec.Cmd
+	mu    sync.Mutex
+	etCmd *exec.Cmd
+	// fsGame is the mod this process was LAUNCHED with. For the replay
+	// instance it decides whether a warm process can play the next demo:
+	// a demo is only playable by the mod that recorded it. "" = not running.
+	fsGame        string
 	desired       bool
 	servers       []string
 	password      string
@@ -37,12 +41,12 @@ type instance struct {
 	nameFails     int
 
 	// pipeline
-	pipe      net.Conn
-	pipeUp    bool
-	lastEvent time.Time
-	tele      Telemetry
-	discSince time.Time
-	etDone    chan struct{}
+	pipe          net.Conn
+	pipeUp        bool
+	lastEvent     time.Time
+	tele          Telemetry
+	discSince     time.Time
+	etDone        chan struct{}
 	pipeCaps      map[string]bool
 	clientVersion string
 
@@ -54,14 +58,14 @@ type instance struct {
 	freeSince     time.Time
 	manualUntil   time.Time
 	lastAudioFix  time.Time
-	pending   map[int]chan []pipePlayer
-	reqID     int
+	pending       map[int]chan []pipePlayer
+	reqID         int
 
 	// director
-	specSent    bool
-	activeSince time.Time
-	nextSwitch  time.Time
-	curTarget   string
+	specSent      bool
+	activeSince   time.Time
+	nextSwitch    time.Time
+	curTarget     string
 	curTargetSlot int
 }
 
@@ -248,10 +252,10 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	st.mu.Lock()
 	resp := map[string]any{
-		"et_running": st.etCmd != nil,
-		"server":     st.currentServer,
-		"watchdog":   st.desired,
-		"pipeline":   st.pipeUp,
+		"et_running":     st.etCmd != nil,
+		"server":         st.currentServer,
+		"watchdog":       st.desired,
+		"pipeline":       st.pipeUp,
 		"telemetry":      st.tele,
 		"following":      st.curTarget,
 		"client_version": st.clientVersion,
@@ -441,6 +445,6 @@ func main() {
 	http.HandleFunc("/replay/segments", handleReplaySegments)
 	http.HandleFunc("/replay/stop", handleReplayStop)
 	http.HandleFunc("/replay/status", handleReplayStatus)
-	log.Println("wolffiles-stream-agent v3 listening on", cfg.Listen)
+	log.Println("wolffiles-stream-agent v1.0.0 listening on", cfg.Listen)
 	log.Fatal(http.ListenAndServe(cfg.Listen, nil))
 }

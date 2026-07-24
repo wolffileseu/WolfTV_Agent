@@ -31,24 +31,35 @@ type Config struct {
 	// segments around a highlight while the LIVE instance keeps streaming.
 	// Everything here is inert unless replay_enabled is true; a failure in
 	// the replay path never touches the live instance.
-	ReplayEnabled      bool    `json:"replay_enabled"`
-	ReplayHomepath     string  `json:"replay_homepath"`      // fs_homepath for the replay instance (must differ from live)
-	ReplayPipeAddr     string  `json:"replay_pipe_addr"`     // replay instance's cl_wtvPort pipe, e.g. "127.0.0.1:8791"
-	ReplayIdleStopSec  int     `json:"replay_idle_stop_sec"` // stop the warm replay instance after this idle time (default 300)
-	ReplayPreSec       int     `json:"replay_pre_sec"`       // seconds of demo before the highlight (default 8)
-	ReplayPostSec      int     `json:"replay_post_sec"`      // seconds of demo after the highlight (default 5)
-	ReplaySpeed        float64 `json:"replay_speed"`         // playback timescale during the window, <1 = slow-mo (default 0.4)
-	ReplaySeekTimescale int    `json:"replay_seek_timescale"` // fast-forward timescale while seeking (default 8)
-	ReplayTitle        string  `json:"replay_title"`         // SDL/window title for the replay instance (default "WolfTV-Replay")
+	ReplayEnabled  bool   `json:"replay_enabled"`
+	ReplayPipeAddr string `json:"replay_pipe_addr"` // replay instance's cl_wtvPort pipe, e.g. "127.0.0.1:8791"
+	// ReplayHomepath is DEPRECATED and ignored. The replay instance must run
+	// under the SAME fs_homepath as the live instance -- a separate homepath
+	// has none of the pk3s the demos need and playback fails with a checksum
+	// error. The two are separated by ET profile (ReplayProfile) instead.
+	ReplayHomepath string `json:"replay_homepath"`
+	// ReplayProfile is the replay instance's cl_profile, so its profile.pid and
+	// startup config exec do not collide with the live instance's in the shared
+	// homepath (default "wolftv-replay").
+	ReplayProfile       string  `json:"replay_profile"`
+	ReplayIdleStopSec   int     `json:"replay_idle_stop_sec"`  // stop the warm replay instance after this idle time (default 300)
+	ReplayPreSec        int     `json:"replay_pre_sec"`        // seconds of demo before the highlight (default 8)
+	ReplayPostSec       int     `json:"replay_post_sec"`       // seconds of demo after the highlight (default 5)
+	ReplaySpeed         float64 `json:"replay_speed"`          // playback timescale during the window, <1 = slow-mo (default 0.4)
+	ReplaySeekTimescale int     `json:"replay_seek_timescale"` // fast-forward timescale while seeking (default 8)
+	ReplayTitle         string  `json:"replay_title"`          // SDL/window title for the replay instance (default "WolfTV-Replay")
 
-	// The replay instance plays demos recorded by the LIVE instance. Because
-	// the two run under different fs_homepaths, the agent copies the demo
-	// into the replay homepath before playback. To locate the source it needs
-	// the live homepath and fs_game; both are auto-detected from et_args
-	// (+set fs_homepath / +set fs_game) and can be overridden here.
+	// The replay instance plays demos recorded by the LIVE instance out of one
+	// demo root under the shared fs_homepath, with a per-mod sub-directory
+	// (<root>/<mod>/wtv_<map>_<svtime>.dm_84). The agent needs the live homepath
+	// (auto-detected from et_args' +set fs_homepath) and the root's name; the
+	// mod comes from the demo segment itself, never from config.
 	LiveHomepath  string `json:"live_homepath"`   // "" = auto-detect from et_args
-	FsGame        string `json:"fs_game"`         // "" = auto-detect from et_args
-	ReplayDemoDir string `json:"replay_demo_dir"` // demo sub-dir under fs_game (matches cl_wtvDemoDir, default "wtvdemos")
+	ReplayDemoDir string `json:"replay_demo_dir"` // demo root under fs_homepath (matches cl_wtvDemoPath, default "wtvdemos")
+	// FsGame is DEPRECATED and unused: demo paths are no longer fs_game-relative
+	// and the mod to launch the replay instance with is reported per demo
+	// segment. Kept only to warn when an old config still sets it.
+	FsGame string `json:"fs_game"`
 
 	// dry_run exercises the whole replay orchestration WITHOUT spawning ET or
 	// touching OBS: every command/scene-cut/sleep is logged instead. Lets the
@@ -120,8 +131,8 @@ const defaultConfig = `{
   "pipe_addr": "127.0.0.1:8790",
 
   "replay_enabled": false,
-  "replay_homepath": "C:\\Stream\\replayhome",
   "replay_pipe_addr": "127.0.0.1:8791",
+  "replay_profile": "wolftv-replay",
   "replay_idle_stop_sec": 300,
   "replay_pre_sec": 8,
   "replay_post_sec": 5,
@@ -129,7 +140,6 @@ const defaultConfig = `{
   "replay_seek_timescale": 8,
   "replay_title": "WolfTV-Replay",
   "live_homepath": "",
-  "fs_game": "",
   "replay_demo_dir": "wtvdemos",
   "dry_run": false,
 
@@ -231,15 +241,28 @@ func loadConfig() {
 	if cfg.ReplayTitle == "" {
 		cfg.ReplayTitle = "WolfTV-Replay"
 	}
+	if cfg.ReplayProfile == "" {
+		cfg.ReplayProfile = "wolftv-replay"
+	}
 	if cfg.ReplayDemoDir == "" {
 		cfg.ReplayDemoDir = "wtvdemos"
 	}
-	// Auto-detect the live homepath and fs_game from et_args unless set.
+	// Auto-detect the live homepath from et_args unless set. The replay
+	// instance runs under this same homepath -- it is the only place the pk3s
+	// the demos need exist.
 	if cfg.LiveHomepath == "" {
 		cfg.LiveHomepath = argValue(cfg.EtArgs, "fs_homepath")
 	}
-	if cfg.FsGame == "" {
-		cfg.FsGame = argValue(cfg.EtArgs, "fs_game")
+	if cfg.ReplayHomepath != "" && cfg.ReplayHomepath != cfg.LiveHomepath {
+		log.Printf("config: replay_homepath (%s) is obsolete and IGNORED -- the replay instance "+
+			"runs under the live homepath (%s), otherwise it has none of the pk3s the demos need",
+			cfg.ReplayHomepath, cfg.LiveHomepath)
+	}
+	cfg.ReplayHomepath = ""
+	if cfg.FsGame != "" {
+		log.Printf("config: fs_game (%s) is obsolete and IGNORED -- demos live in one flat "+
+			"directory and each segment reports the mod that recorded it", cfg.FsGame)
+		cfg.FsGame = ""
 	}
 }
 

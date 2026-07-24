@@ -14,39 +14,54 @@ import (
  * timeline the replay director will later consume. */
 
 type ActionEvent struct {
-	Seq       int64  `json:"seq"`
-	Recv      int64  `json:"recv"`   // agent unix ms when received
-	Kind      string `json:"kind"`
-	SvTime    int    `json:"svtime"` // server time ms
-	Attacker  string `json:"attacker,omitempty"`
-	Victim    string `json:"victim,omitempty"`
-	Weapon    string `json:"weapon,omitempty"`
-	Text      string `json:"text,omitempty"`
-	Server    string `json:"server,omitempty"`
-	Map       string `json:"map,omitempty"`
-	Highlight string `json:"highlight,omitempty"` // set if this triggered one
-	Score     int    `json:"score,omitempty"`     // highlight weight
+	Seq          int64  `json:"seq"`
+	Recv         int64  `json:"recv"` // agent unix ms when received
+	Kind         string `json:"kind"`
+	SvTime       int    `json:"svtime"` // server time ms
+	Attacker     string `json:"attacker,omitempty"`
+	Victim       string `json:"victim,omitempty"`
+	Weapon       string `json:"weapon,omitempty"`
+	Text         string `json:"text,omitempty"`
+	AttackerSlot int    `json:"attacker_slot,omitempty"` // absolute client num, -1 if none
+	Server       string `json:"server,omitempty"`
+	Map          string `json:"map,omitempty"`
+	// Camera context captured when the event landed: who the live instance was
+	// following. FollowedSlot is -1 for free cam / not following.
+	Followed     string `json:"followed,omitempty"`
+	FollowedSlot int    `json:"followed_slot"`
+	Highlight    string `json:"highlight,omitempty"` // set if this triggered one
+	Score        int    `json:"score,omitempty"`     // highlight weight
 }
 
 type DemoSegment struct {
-	File       string `json:"file"`
-	Path       string `json:"path,omitempty"` // game-relative path the replay client loads by
-	Map        string `json:"map"`
-	StartSv    int    `json:"seg_start_svtime"`
-	EndSv      int    `json:"seg_end_svtime,omitempty"`
-	Recv       int64  `json:"recv"`
+	File    string `json:"file"`
+	Path    string `json:"path,omitempty"` // homepath-relative path as reported by the client (informational)
+	Mod     string `json:"mod,omitempty"`  // fs_game that RECORDED this demo -- only that mod can play it
+	Map     string `json:"map"`
+	StartSv int    `json:"seg_start_svtime"`
+	EndSv   int    `json:"seg_end_svtime,omitempty"`
+	Recv    int64  `json:"recv"`
 }
 
 type Highlight struct {
-	Kind    string `json:"kind"`    // multikill, streak, dynamite, objective...
-	Player  string `json:"player"`
-	SvTime  int    `json:"svtime"`
-	Score   int    `json:"score"`
-	Count   int    `json:"count,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Server  string `json:"server,omitempty"`
-	Map     string `json:"map,omitempty"`
-	Recv    int64  `json:"recv"`
+	Kind   string `json:"kind"` // multikill, streak, dynamite, objective...
+	Player string `json:"player"`
+	SvTime int    `json:"svtime"`
+	Score  int    `json:"score"`
+	Count  int    `json:"count,omitempty"`
+	Text   string `json:"text,omitempty"`
+	Server string `json:"server,omitempty"`
+	Map    string `json:"map,omitempty"`
+	Recv   int64  `json:"recv"`
+
+	// Camera context at the moment of the highlight, so the panel can show
+	// which highlights are actually replayable and the auto-director can filter
+	// to only those. A demo replays a highlight only if the camera was on the
+	// player who made it.
+	Followed     string `json:"followed,omitempty"` // followed player's name
+	FollowedSlot int    `json:"followed_slot"`      // -1 if not following anyone
+	PlayerSlot   int    `json:"player_slot"`        // subject's slot, -1 if unknown
+	Replayable   bool   `json:"replayable"`         // camera was on the subject
 }
 
 type killTrack struct {
@@ -56,9 +71,9 @@ type killTrack struct {
 type eventFeed struct {
 	mu         sync.Mutex
 	seq        int64
-	events     []ActionEvent  // ring
-	segments   []DemoSegment  // ring
-	highlights []Highlight    // ring
+	events     []ActionEvent // ring
+	segments   []DemoSegment // ring
+	highlights []Highlight   // ring
 	kills      map[string]*killTrack
 	scans      []map[string]any
 	maxScans   int
@@ -81,6 +96,21 @@ const (
 	multiKillMin      = 2    // >=2 kills = multikill highlight
 	streakMin         = 5    // kills without dying (approx) for a streak
 )
+
+// highlightReplayable reports whether a highlight can be replayed from the demo:
+// true only if the camera was following the highlight's subject. Slot matching
+// is preferred (robust against duplicate names); a name match is the fallback
+// for subjects with no known slot (objective events). A subject with neither a
+// slot nor a name (e.g. an unattributed dynamite) is never replayable.
+func highlightReplayable(subjectSlot int, subjectName string, followedSlot int, followedName string) bool {
+	if subjectSlot >= 0 && followedSlot >= 0 {
+		return subjectSlot == followedSlot
+	}
+	if subjectName != "" && followedName != "" {
+		return strings.EqualFold(cleanName(subjectName), cleanName(followedName))
+	}
+	return false
+}
 
 func (f *eventFeed) addAction(a ActionEvent) {
 	f.mu.Lock()
@@ -110,10 +140,14 @@ func (f *eventFeed) addAction(a ActionEvent) {
 			score := len(recent) * 3 // double=6, triple=9...
 			a.Highlight = "multikill"
 			a.Score = score
+			// subject of a multikill is the attacker; match by slot.
 			f.pushHighlightLocked(Highlight{
 				Kind: "multikill", Player: cleanName(a.Attacker),
 				SvTime: a.SvTime, Score: score, Count: len(recent),
 				Server: a.Server, Map: a.Map, Recv: a.Recv,
+				Followed: a.Followed, FollowedSlot: a.FollowedSlot,
+				PlayerSlot: a.AttackerSlot,
+				Replayable: highlightReplayable(a.AttackerSlot, a.Attacker, a.FollowedSlot, a.Followed),
 			})
 		}
 	}
@@ -121,13 +155,19 @@ func (f *eventFeed) addAction(a ActionEvent) {
 	// objective-class highlights
 	switch a.Kind {
 	case "dynamite_explode":
+		// no attributed player -> never camera-replayable.
 		a.Highlight, a.Score = "dynamite", 8
 		f.pushHighlightLocked(Highlight{Kind: "dynamite", SvTime: a.SvTime,
-			Score: 8, Server: a.Server, Map: a.Map, Recv: a.Recv})
+			Score: 8, Server: a.Server, Map: a.Map, Recv: a.Recv,
+			Followed: a.Followed, FollowedSlot: a.FollowedSlot, PlayerSlot: -1,
+			Replayable: false})
 	case "objective_taken", "objective_secured", "checkpoint":
+		// objective events carry a player name but no slot; match by name.
 		a.Highlight, a.Score = "objective", 5
 		f.pushHighlightLocked(Highlight{Kind: "objective", Player: cleanName(a.Attacker),
-			SvTime: a.SvTime, Score: 5, Text: a.Text, Server: a.Server, Map: a.Map, Recv: a.Recv})
+			SvTime: a.SvTime, Score: 5, Text: a.Text, Server: a.Server, Map: a.Map, Recv: a.Recv,
+			Followed: a.Followed, FollowedSlot: a.FollowedSlot, PlayerSlot: -1,
+			Replayable: highlightReplayable(-1, a.Attacker, a.FollowedSlot, a.Followed)})
 	}
 
 	f.events = append(f.events, a)
