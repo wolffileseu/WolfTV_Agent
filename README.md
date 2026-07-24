@@ -42,10 +42,12 @@ All endpoints require `Authorization: Bearer <token>`.
 | `/exec`     | POST   | send a console command to the client         |
 | `/log`      | GET    | tail the agent log                           |
 | `/scene`    | GET/POST | read / switch the OBS program scene        |
-| `/replay/segments` | GET | recorded demo segments + their highlights |
+| `/replay/segments` | GET | recorded demo segments + their highlights (with `replayable`) |
 | `/replay`   | POST   | play back a demo segment around a highlight   |
 | `/replay/stop`   | POST | abort a running replay, cut back to live  |
 | `/replay/status` | GET | current replay phase/state                  |
+| `/director/config` | GET/POST | read / live-update the auto-director settings |
+| `/director/status` | GET | what the auto-director is currently thinking |
 
 ## Two-instance model & replay cinema
 
@@ -135,10 +137,65 @@ POST /replay
   -> 400 on unknown file / offset outside the segment / undeterminable mod
 
 POST /replay/stop      -> aborts, cuts back to the live scene immediately
-GET  /replay/status    -> {"active","phase":"idle|starting|seeking|playing|
-                           returning","file","mod","offset_ms","started_at",
-                           "instance_up","instance_mod"}
+GET  /replay/status    -> {"active","phase":"idle|starting|loading|seeking|
+                           prepared|playing|returning","file","mod","offset_ms",
+                           "started_at","instance_up","instance_mod"}
 ```
+
+### Automatic replay director
+
+A demo records only what the live camera was following, so **a highlight can be
+replayed only if the camera was on the player who made it.** Every highlight in
+`/events` and `/replay/segments` therefore carries `replayable` (plus `followed`
+/ `followed_slot`); the panel greys out the rest, and the auto-director never
+picks them.
+
+- **Camera by heat.** The live camera is steered toward the player with the most
+  recent-kill *heat* (each kill weighted `0.5^(age/half-life)`), so it is already
+  on whoever is most likely to make the next multikill. Humans break ties;
+  `dir_min_sec` is the floor, but a heat spike cuts early.
+- **Cut on a lull.** Like a sports broadcast, the director replays during a quiet
+  moment (no kills/objectives for `lull_sec`), never mid map change, never while
+  the live pipeline is down, spaced by `min_interval_sec` and capped per map.
+- **Prepared ahead of time.** As soon as a good candidate exists, the warm replay
+  instance loads the demo, seeks to the window and **holds**, so the lull cut is
+  instant instead of paying the ~40s cold cost.
+
+It is **off by default** (`auto_replay:false`) and the manual `/replay` path is
+unaffected by it.
+
+```
+GET  /director/config  -> the current settings (see director.json below)
+POST /director/config  {"lull_sec":8,"auto_replay":true, ...}   # partial, live
+  -> applies immediately and persists to director.json
+
+GET  /director/status
+  -> {"auto_enabled",
+      "candidates":[{"file","player","score","age_sec","offset_ms",
+                     "eligible",...}],          # ranked best-first
+      "last_replay_at","next_eligible_at","quiet_for_sec","lull_sec",
+      "map_replays","per_map_cap",
+      "prepared":{"file","mod","phase","held","holding_for_sec"}}
+```
+
+**Runtime settings live in `director.json`**, written next to `config.json`
+(never rewriting the hand-maintained `config.json`). It is created on first
+`POST /director/config` and reloaded at startup:
+
+```
+{ "auto_replay": false,
+  "heat_window_sec": 30, "heat_half_life_sec": 8, "heat_spike_factor": 2.0,
+  "lull_sec": 6, "min_interval_sec": 180, "min_highlight_age_sec": 60,
+  "per_map_cap": 3, "pre_sec": 8, "post_sec": 5, "speed": 0.4 }
+```
+
+> **Hold caveat (needs a live check).** Preparation holds the seeked demo with
+> `timescale 0`. Whether ET truly freezes the demo parse there (vs. drifting)
+> was not verifiable on the dev box. If a prepared replay starts late, that is
+> why — disable `auto_replay`; the manual path (which seeks and plays in one go)
+> is unaffected. `replay_seek_mode:"fastforward"` switches the seek to the
+> client's parse-level `fastforward` command (accurate, near-instant, but also
+> pending a live A/B; default `timescale`).
 
 ### Locating demos, and the mod
 

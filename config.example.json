@@ -42,10 +42,14 @@
   "replay_speed": 0.4,
   "_comment_replay_seek_timescale": "Fast-forward timescale used to seek to the highlight before dropping into slow motion.",
   "replay_seek_timescale": 8,
+  "_comment_replay_seek_mode": "How the replay seeks to the highlight. 'timescale' (default, known-working) plays at replay_seek_timescale for a wall-clock-estimated duration. 'fastforward' uses the client's parse-level fastforward command (accurate, near-instant) -- better on paper but pending a live A/B.",
+  "replay_seek_mode": "timescale",
   "replay_title": "WolfTV-Replay",
   "_comment_replay_locate": "The client writes demos into ONE root under fs_homepath, one sub-directory per mod (<root>/<mod>/wtv_<map>_<svtime>.dm_84), and loads them back with 'wtvdemo <mod>/<file>'. replay_demo_dir must match the client's cl_wtvDemoPath (default wtvdemos). live_homepath auto-detects from et_args (+set fs_homepath) and is also the homepath the replay instance runs under; set it here if it is not in et_args. There is no fs_game field any more: each demo segment reports the mod that recorded it (as its own field and as the directory of the reported path), and the replay instance is launched with THAT mod (restarted if the warm instance runs a different one).",
   "live_homepath": "",
   "replay_demo_dir": "wtvdemos",
   "_comment_dry_run": "Exercise the whole replay orchestration WITHOUT spawning ET or touching OBS (every command/scene-cut/wait is logged). Also settable with the -dry-run CLI flag.",
-  "dry_run": false
+  "dry_run": false,
+
+  "_comment_director": "The automatic replay director's runtime settings (auto_replay on/off, heat weighting, lull threshold, min interval, min highlight age, per-map cap, playback window) are NOT here -- they live in director.json next to this file so they can be tuned live via POST /director/config without editing this hand-maintained file. director.json is created on first update; see the README. auto_replay defaults to false."
 }
