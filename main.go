@@ -40,6 +40,13 @@ type instance struct {
 	startedAt     time.Time
 	nameFails     int
 
+	// adopted: this instance's ET was already running when the agent started
+	// (e.g. across a /restart) and is being managed through the control pipe
+	// rather than a child-process handle. Set by adoptLiveET, cleared by spawn.
+	// While adopted with no server pool, the watchdog stays hands-off (it has no
+	// way to relaunch, so it must not kill what it cannot bring back).
+	adopted bool
+
 	// pipeline
 	pipe          net.Conn
 	pipeUp        bool
@@ -258,7 +265,9 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	st.mu.Lock()
 	resp := map[string]any{
-		"et_running":     st.etCmd != nil,
+		// an adopted ET has no child handle but is genuinely running.
+		"et_running":     st.etCmd != nil || st.adopted,
+		"adopted":        st.adopted,
 		"server":         st.currentServer,
 		"watchdog":       st.desired,
 		"pipeline":       st.pipeUp,
@@ -430,6 +439,7 @@ func main() {
 		}
 	}
 	st.pipeAddr = cfg.PipeAddr // the live instance uses the existing pipe_addr
+	adoptLiveET()              // re-attach to a live ET already running (e.g. across /restart)
 	go st.pipeLoop()
 	go directorLoop()
 	go watchdog()
@@ -456,8 +466,11 @@ func main() {
 	http.HandleFunc("/replay/stop", handleReplayStop)
 	http.HandleFunc("/replay/status", handleReplayStatus)
 	http.HandleFunc("/reload", handleReload)
+	http.HandleFunc("/restart", handleRestart)
 	http.HandleFunc("/director/config", handleDirectorConfig)
 	http.HandleFunc("/director/status", handleDirectorStatus)
 	log.Println("wolftv-agent v1.0.0 listening on", cfg.Listen)
-	log.Fatal(http.ListenAndServe(cfg.Listen, nil))
+	// serveWithRetry (not ListenAndServe) so a /restart handoff can rebind the
+	// port once the previous process releases it.
+	log.Fatal(serveWithRetry(cfg.Listen, nil))
 }

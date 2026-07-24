@@ -23,6 +23,7 @@ func (in *instance) spawn(args []string) error {
 		return err
 	}
 	in.etCmd = cmd
+	in.adopted = false // we now manage a real child process, not an adopted one
 	in.startedAt = time.Now()
 	done := make(chan struct{})
 	in.etDone = done
@@ -277,8 +278,17 @@ func watchdog() {
 			st.mu.Unlock()
 			continue
 		}
-		// 1) process dead
-		if st.etCmd == nil {
+		// An adopted ET (running from before an agent restart) with no server
+		// pool can't be relaunched by us, so the watchdog stays hands-off: it
+		// must never kill a broadcast it cannot bring back, nor spawn a second
+		// ET. A panel /start (which sets servers and spawns, clearing adopted)
+		// hands normal management back.
+		if st.adopted && len(st.servers) == 0 {
+			st.mu.Unlock()
+			continue
+		}
+		// 1) process dead (an adopted instance is alive via its pipe, not etCmd)
+		if st.etCmd == nil && !st.adopted {
 			log.Println("watchdog: et dead -> relaunch")
 			if _, err := deploy(st.servers, st.password, ""); err != nil {
 				log.Println("watchdog: relaunch failed:", err)

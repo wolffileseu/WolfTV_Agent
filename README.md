@@ -360,6 +360,31 @@ If the new file fails to parse or validate (e.g. a short `token`), the running
 config is kept and `/reload` returns the error — the agent is never left
 half-configured.
 
+### Agent restart — `/restart`
+
+`POST /restart` re-execs the agent binary (same working directory and
+arguments) and lets the old process exit, so a change that needs a restart
+(see the list above) does not require remote access. It **refuses with `409`
+while a replay is in flight**, so a restart can't strand the broadcast on the
+replay scene.
+
+**The live ET is left running** and the new process re-attaches to it through
+the control pipe (adoption), so the broadcast is seamless across the restart —
+provided the pipeline can reconnect, which it now can (the stock pipeline dialed
+only when it owned the ET child handle; adoption was added so re-attach works).
+While adopted with no server pool, the watchdog stays hands-off: it can't
+relaunch ET, so it must never kill a broadcast it can't bring back — a later
+panel `/start` hands normal management back. On startup the agent also adopts
+any ET already answering the pipe, so a crash-restart re-attaches too.
+
+> This is a **spawn-and-exit**, not a Windows service restart. The agent must be
+> started from the **interactive session** (ET needs a desktop and GPU access),
+> so `/restart` is not a substitute for the Task Scheduler autostart — it only
+> replaces the *running* agent with a fresh one in the same session.
+>
+> The adoption path (re-attaching to a live ET, seamless broadcast) needs a live
+> check on the streaming box; it can't be exercised without a real ET + OBS.
+
 ### Security
 
 The agent's control port lets a caller drive your stream and run client

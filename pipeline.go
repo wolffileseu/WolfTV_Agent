@@ -67,7 +67,10 @@ func (in *instance) pipeLoop() {
 	}
 	for {
 		in.mu.Lock()
-		running := in.etCmd != nil
+		// dial when we launched ET (etCmd) OR when we adopted an already-running
+		// ET across a restart (adopted) -- otherwise the broadcast would be
+		// stranded with no pipeline after an agent restart.
+		running := in.etCmd != nil || in.adopted
 		in.mu.Unlock()
 		if !running {
 			time.Sleep(2 * time.Second)
@@ -202,6 +205,11 @@ func (in *instance) pipeLoop() {
 				}
 				if m.Server != "" {
 					in.tele.Server = m.Server
+					// an adopted instance has no currentServer yet -- learn it
+					// from telemetry so the director's getstatus lookups work.
+					if in.adopted && in.currentServer == "" {
+						in.currentServer = m.Server
+					}
 				}
 				if m.Map != "" {
 					in.tele.Map = m.Map
