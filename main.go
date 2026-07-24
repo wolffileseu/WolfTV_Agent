@@ -455,6 +455,7 @@ func main() {
 	http.HandleFunc("/replay/segments", handleReplaySegments)
 	http.HandleFunc("/replay/stop", handleReplayStop)
 	http.HandleFunc("/replay/status", handleReplayStatus)
+	http.HandleFunc("/reload", handleReload)
 	http.HandleFunc("/director/config", handleDirectorConfig)
 	http.HandleFunc("/director/status", handleDirectorStatus)
 	log.Println("wolftv-agent v1.0.0 listening on", cfg.Listen)

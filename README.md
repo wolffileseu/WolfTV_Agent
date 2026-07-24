@@ -35,7 +35,10 @@ All endpoints require `Authorization: Bearer <token>`.
 | `/switch`   | POST   | seamless switch to another server            |
 | `/stop`     | POST   | stop streaming (and optionally kill OBS)     |
 | `/status`   | GET    | ET/OBS/pipeline/audio status + telemetry     |
-| `/system`   | GET    | CPU / RAM / disk / network throughput        |
+| `/system`   | GET    | CPU / RAM / GPU / disk / network throughput  |
+| `/preview`  | GET    | JPEG screenshot of the current OBS scene     |
+| `/reload`   | POST   | re-read config.json live (see below)         |
+| `/restart`  | POST   | re-exec the agent process (see below)        |
 | `/events`   | GET    | live feed (kills, highlights, demo segments) |
 | `/players`  | GET    | live roster                                  |
 | `/follow`   | POST   | point the camera at a player slot            |
@@ -332,6 +335,30 @@ It is applied to **both** the live and replay instances. Explicit `r_custom*`
 already in `et_args` wins (and is logged once), so existing configs are
 unchanged. An unknown value warns and falls back to `1080p`. Leave it empty to
 drive resolution purely from `et_args`.
+
+### Live reconfiguration — `/reload`
+
+`POST /reload` re-reads `config.json` without restarting, so a settings change
+does not cost a remote session. It reports what took effect and what is still
+pending a restart:
+
+```json
+{ "ok": true,
+  "changed": ["dir_min_sec", "scene_replay", "obs_password"],
+  "needs_restart": ["listen", "et_args"] }
+```
+
+- **Applied live** (`changed`): director timings, audio thresholds, scene names,
+  OBS address/password/path, watchdog and server-pool settings, replay window
+  defaults, disk path.
+- **Needs a restart** (`needs_restart`): `listen`, `token`, `pipe_addr`,
+  `replay_pipe_addr`, `et_path`, `et_exe_name`, `et_args`, `live_homepath`,
+  `replay_enabled`, `resolution`, `log_file` — these are bound at process start
+  or only read when ET launches. Change them, then `POST /restart`.
+
+If the new file fails to parse or validate (e.g. a short `token`), the running
+config is kept and `/reload` returns the error — the agent is never left
+half-configured.
 
 ### Security
 

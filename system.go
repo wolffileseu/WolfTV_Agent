@@ -79,8 +79,11 @@ func (s *sysMonitor) sample() {
 		st.MemTotalMB = vm.Total / 1024 / 1024
 	}
 
-	// Disk.
-	if du, err := disk.Usage(s.diskPath); err == nil {
+	// Disk. Read the path under the lock so /reload can change it live.
+	s.mu.Lock()
+	diskPath := s.diskPath
+	s.mu.Unlock()
+	if du, err := disk.Usage(diskPath); err == nil {
 		st.DiskPercent = round1(du.UsedPercent)
 		st.DiskUsedGB = du.Used / 1024 / 1024 / 1024
 		st.DiskTotalGB = du.Total / 1024 / 1024 / 1024
@@ -116,6 +119,17 @@ func (s *sysMonitor) snapshot() SystemStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.last
+}
+
+// setDiskPath changes the reported volume live (used by /reload). Empty picks
+// the platform default.
+func (s *sysMonitor) setDiskPath(p string) {
+	if p == "" {
+		p = defaultDiskPath()
+	}
+	s.mu.Lock()
+	s.diskPath = p
+	s.mu.Unlock()
 }
 
 func round1(f float64) float64 {

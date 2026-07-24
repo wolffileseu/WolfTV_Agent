@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
+	"sync"
 )
 
 type Config struct {
@@ -180,12 +182,20 @@ const defaultConfig = `{
 // panel-editable director settings) is written next to it.
 var configPath = "config.json"
 
+// cliDryRun records the -dry-run CLI flag so it survives a /reload (which
+// re-reads the file's dry_run but must not lose the command-line override).
+var cliDryRun bool
+
+// cfgMu serialises /reload writers. Readers across the agent access cfg
+// lock-free by existing design; /reload only mutates the hot-reloadable fields
+// (see reload.go), whose torn-read window is microseconds and self-correcting.
+var cfgMu sync.Mutex
+
 func loadConfig() {
 	path := "config.json"
-	dryFlag := false
 	for _, a := range os.Args[1:] {
 		if a == "-dry-run" || a == "--dry-run" {
-			dryFlag = true
+			cliDryRun = true
 			continue
 		}
 		path = a // first non-flag argument is the config path
@@ -203,85 +213,107 @@ func loadConfig() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		log.Fatalf("config parse: %v", err)
+	c, perr := parseConfigBytes(data, true) // true: log deprecation warnings at startup
+	if perr != nil {
+		log.Fatalf("config: %v", perr)
 	}
-	if len(cfg.Token) < 16 {
-		log.Fatal("config: token missing or too short")
+	cfg = c
+}
+
+// parseConfigBytes unmarshals, validates and fills defaults for a config, WITHOUT
+// touching the running cfg or exiting -- so it is reusable by /reload. warn logs
+// one-time deprecation notices (startup only). Returns an error the caller can
+// surface instead of dying half-configured.
+func parseConfigBytes(data []byte, warn bool) (Config, error) {
+	var c Config
+	if err := json.Unmarshal(data, &c); err != nil {
+		return Config{}, fmt.Errorf("parse: %w", err)
 	}
+	if len(c.Token) < 16 {
+		return Config{}, errStr("token missing or too short")
+	}
+	applyDefaults(&c, warn)
+	return c, nil
+}
+
+// applyDefaults fills in the same defaults loadConfig always applied. Operates
+// on a pointer so it is shared by startup and reload.
+func applyDefaults(c *Config, warn bool) {
 	def := func(v *int, d int) {
 		if *v <= 0 {
 			*v = d
 		}
 	}
-	if cfg.EtExeName == "" {
-		cfg.EtExeName = "etl.exe"
+	if c.EtExeName == "" {
+		c.EtExeName = "etl.exe"
 	}
-	if cfg.ObsAddr == "" {
-		cfg.ObsAddr = "localhost:4455"
+	if c.ObsAddr == "" {
+		c.ObsAddr = "localhost:4455"
 	}
-	if cfg.Listen == "" {
-		cfg.Listen = "0.0.0.0:8788"
+	if c.Listen == "" {
+		c.Listen = "0.0.0.0:8788"
 	}
 	// Live is the scene we always cut back to, so it needs a sane default.
 	// Replay/Standby stay empty if unset -- /scene then reports them as
 	// unconfigured instead of switching to a scene that doesn't exist.
-	if cfg.SceneLive == "" {
-		cfg.SceneLive = "Live"
+	if c.SceneLive == "" {
+		c.SceneLive = "Live"
 	}
-	def(&cfg.DirMinSec, 120)
-	def(&cfg.DirMaxSec, 300)
-	def(&cfg.SpecDelaySec, 5)
-	def(&cfg.WatchIntervalSec, 60)
-	def(&cfg.WatchFailLimit, 3)
-	def(&cfg.TeleTimeoutSec, 30)
-	if cfg.LogFile == "" {
-		cfg.LogFile = "wolffiles-agent.log"
+	def(&c.DirMinSec, 120)
+	def(&c.DirMaxSec, 300)
+	def(&c.SpecDelaySec, 5)
+	def(&c.WatchIntervalSec, 60)
+	def(&c.WatchFailLimit, 3)
+	def(&c.TeleTimeoutSec, 30)
+	if c.LogFile == "" {
+		c.LogFile = "wolffiles-agent.log"
 	}
-	def(&cfg.AudioSilenceSec, 30)
-	if cfg.DirMaxSec < cfg.DirMinSec {
-		cfg.DirMaxSec = cfg.DirMinSec
+	def(&c.AudioSilenceSec, 30)
+	if c.DirMaxSec < c.DirMinSec {
+		c.DirMaxSec = c.DirMinSec
 	}
 
 	// --- replay defaults ---
-	if dryFlag {
-		cfg.DryRun = true
+	if cliDryRun {
+		c.DryRun = true
 	}
-	def(&cfg.ReplayIdleStopSec, 300)
-	def(&cfg.ReplayPreSec, 8)
-	def(&cfg.ReplayPostSec, 5)
-	def(&cfg.ReplaySeekTimescale, 8)
-	if cfg.ReplaySpeed <= 0 {
-		cfg.ReplaySpeed = 0.4
+	def(&c.ReplayIdleStopSec, 300)
+	def(&c.ReplayPreSec, 8)
+	def(&c.ReplayPostSec, 5)
+	def(&c.ReplaySeekTimescale, 8)
+	if c.ReplaySpeed <= 0 {
+		c.ReplaySpeed = 0.4
 	}
-	if cfg.ReplayTitle == "" {
-		cfg.ReplayTitle = "WolfTV-Replay"
+	if c.ReplayTitle == "" {
+		c.ReplayTitle = "WolfTV-Replay"
 	}
-	if cfg.ReplaySeekMode != "fastforward" {
-		cfg.ReplaySeekMode = "timescale" // default to the known-working seek
+	if c.ReplaySeekMode != "fastforward" {
+		c.ReplaySeekMode = "timescale" // default to the known-working seek
 	}
-	if cfg.ReplayProfile == "" {
-		cfg.ReplayProfile = "wolftv-replay"
+	if c.ReplayProfile == "" {
+		c.ReplayProfile = "wolftv-replay"
 	}
-	if cfg.ReplayDemoDir == "" {
-		cfg.ReplayDemoDir = "wtvdemos"
+	if c.ReplayDemoDir == "" {
+		c.ReplayDemoDir = "wtvdemos"
 	}
 	// Auto-detect the live homepath from et_args unless set. The replay
 	// instance runs under this same homepath -- it is the only place the pk3s
 	// the demos need exist.
-	if cfg.LiveHomepath == "" {
-		cfg.LiveHomepath = argValue(cfg.EtArgs, "fs_homepath")
+	if c.LiveHomepath == "" {
+		c.LiveHomepath = argValue(c.EtArgs, "fs_homepath")
 	}
-	if cfg.ReplayHomepath != "" && cfg.ReplayHomepath != cfg.LiveHomepath {
+	if c.ReplayHomepath != "" && c.ReplayHomepath != c.LiveHomepath && warn {
 		log.Printf("config: replay_homepath (%s) is obsolete and IGNORED -- the replay instance "+
 			"runs under the live homepath (%s), otherwise it has none of the pk3s the demos need",
-			cfg.ReplayHomepath, cfg.LiveHomepath)
+			c.ReplayHomepath, c.LiveHomepath)
 	}
-	cfg.ReplayHomepath = ""
-	if cfg.FsGame != "" {
-		log.Printf("config: fs_game (%s) is obsolete and IGNORED -- demos live in one flat "+
-			"directory and each segment reports the mod that recorded it", cfg.FsGame)
-		cfg.FsGame = ""
+	c.ReplayHomepath = ""
+	if c.FsGame != "" {
+		if warn {
+			log.Printf("config: fs_game (%s) is obsolete and IGNORED -- demos live in one flat "+
+				"directory and each segment reports the mod that recorded it", c.FsGame)
+		}
+		c.FsGame = ""
 	}
 }
 
