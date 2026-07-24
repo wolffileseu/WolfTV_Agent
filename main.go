@@ -231,7 +231,8 @@ func handleStop(w http.ResponseWriter, r *http.Request) {
 	st.mu.Lock()
 	st.desired = false
 	if cfg.KillObsOnStop {
-		_ = exec.Command("taskkill", "/IM", "obs64.exe", "/F").Run()
+		// platform_windows.go / platform_linux.go pick taskkill vs pkill
+		_ = killProcessByName("obs64.exe")
 	}
 	st.kill()
 	st.currentServer = ""
@@ -435,6 +436,7 @@ func main() {
 	go audioMonitor()
 	go winAudioMonitor()
 	startSysMonitor(cfg.DiskPath)
+	startGPUMonitor()     // nvidia-smi sampler; silently inert without an NVIDIA card
 	setupReplay()         // second (replay) instance + goroutines; no-op unless enabled
 	go autoDirectorLoop() // auto-replay director; inert unless auto_replay enabled
 	http.HandleFunc("/start", handleStart)
@@ -449,11 +451,12 @@ func main() {
 	http.HandleFunc("/log", handleLog)
 	http.HandleFunc("/system", handleSystem)
 	http.HandleFunc("/replay", handleReplay)
+	http.HandleFunc("/preview", handlePreview)
 	http.HandleFunc("/replay/segments", handleReplaySegments)
 	http.HandleFunc("/replay/stop", handleReplayStop)
 	http.HandleFunc("/replay/status", handleReplayStatus)
 	http.HandleFunc("/director/config", handleDirectorConfig)
 	http.HandleFunc("/director/status", handleDirectorStatus)
-	log.Println("wolffiles-stream-agent v1.0.0 listening on", cfg.Listen)
+	log.Println("wolftv-agent v1.0.0 listening on", cfg.Listen)
 	log.Fatal(http.ListenAndServe(cfg.Listen, nil))
 }

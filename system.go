@@ -26,6 +26,9 @@ type SystemStats struct {
 	NetRxMbps   float64 `json:"net_rx_mbps"`
 	NetTxMbps   float64 `json:"net_tx_mbps"`
 	Uptime      int64   `json:"uptime_sec"`
+	// GPU comes from nvidia-smi (gpu.go). Present=false on a machine without
+	// an NVIDIA card, in which case the panel simply omits the tiles.
+	GPU GPUStats `json:"gpu"`
 }
 
 type sysMonitor struct {
@@ -100,6 +103,9 @@ func (s *sysMonitor) sample() {
 		s.lastNetAt = now
 		s.haveNet = true
 	}
+
+	// GPU is sampled on its own schedule; just fold in the latest reading.
+	st.GPU = gpumon.snapshot()
 
 	s.mu.Lock()
 	s.last = st
