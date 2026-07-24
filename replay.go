@@ -501,13 +501,18 @@ type replayJob struct {
 type replayController struct {
 	mu        sync.Mutex
 	active    bool
-	phase     string // idle|starting|seeking|playing|returning
+	phase     string // idle|starting|loading|seeking|prepared|playing|returning
 	file      string
 	mod       string
 	offsetMs  int
 	startedAt int64
 	cancel    chan struct{}
 	lastDone  time.Time
+	// auto-director preparation (Part 3): the warm instance is loaded, seeked
+	// and held so that when the lull comes only the OBS cut + playback remain.
+	autoPrepared bool
+	preparedAt   time.Time
+	preparedJob  replayJob
 }
 
 var replay replayController
@@ -527,7 +532,59 @@ func (rc *replayController) begin(job replayJob) bool {
 	rc.offsetMs = job.offsetMs
 	rc.startedAt = time.Now().Unix()
 	rc.cancel = make(chan struct{})
+	rc.autoPrepared = false
+	rc.preparedJob = job
 	return true
+}
+
+// isActive reports whether the single replay slot is claimed (preparing,
+// holding, or playing).
+func (rc *replayController) isActive() bool {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.active
+}
+
+// isPrepared reports whether a replay is loaded, seeked and holding, ready for
+// an instant cut.
+func (rc *replayController) isPrepared() bool {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.active && rc.autoPrepared
+}
+
+// lastDoneTime returns when the last replay finished (zero if none yet).
+func (rc *replayController) lastDoneTime() time.Time {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.lastDone
+}
+
+// preparedSince returns when the current preparation started holding (zero if
+// not holding).
+func (rc *replayController) preparedSince() time.Time {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.preparedAt
+}
+
+// preparedView describes any prepared/holding clip for /director/status.
+func (rc *replayController) preparedView() map[string]any {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	if !rc.active {
+		return nil
+	}
+	v := map[string]any{
+		"file":  rc.preparedJob.file,
+		"mod":   rc.preparedJob.mod,
+		"phase": rc.phase,
+		"held":  rc.autoPrepared,
+	}
+	if !rc.preparedAt.IsZero() {
+		v["holding_for_sec"] = int(time.Since(rc.preparedAt).Seconds())
+	}
+	return v
 }
 
 func (rc *replayController) setPhase(p string) {
@@ -667,11 +724,7 @@ func (rc *replayController) run(job replayJob) {
 	// 2) seek: fast-forward to just before the window.
 	rc.setPhase("seeking")
 	windowStart, windowEnd := playbackWindow(job.offsetMs, job.preMs, job.postMs)
-	ffTarget := fastForwardUntilMs(windowStart, seekMarginMs)
-	seekTS := cfg.ReplaySeekTimescale
-	rc.replayExec(fmt.Sprintf("timescale %d", seekTS), dry)
-	ffWall := wallMsForDemoMs(ffTarget, float64(seekTS))
-	if !rc.sleepAbortable(time.Duration(ffWall)*time.Millisecond, cancel, dry) {
+	if !rc.seekTo(fastForwardUntilMs(windowStart, seekMarginMs), cancel, dry) {
 		return
 	}
 
@@ -706,9 +759,142 @@ func (rc *replayController) finish(dry bool) {
 	rc.mod = ""
 	rc.offsetMs = 0
 	rc.cancel = nil
+	rc.autoPrepared = false
+	rc.preparedJob = replayJob{}
+	rc.preparedAt = time.Time{}
 	rc.lastDone = time.Now()
 	rc.mu.Unlock()
 	log.Println("replay: done -- live scene restored")
+}
+
+// seekTo fast-forwards the replay demo to targetMs of demo time. Two methods:
+// "fastforward" uses the client's parse-level fastforward command (near-instant,
+// accurate: it advances server time directly), "timescale" (default, the
+// known-working manual path) plays at a high timescale for a wall-clock-estimated
+// duration and biases to undershoot. Returns false if aborted mid-seek.
+func (rc *replayController) seekTo(targetMs int, cancel <-chan struct{}, dry bool) bool {
+	if targetMs <= 0 {
+		return true
+	}
+	if cfg.ReplaySeekMode == "fastforward" {
+		rc.replayExec(fmt.Sprintf("fastforward %.3f", float64(targetMs)/1000.0), dry)
+		return rc.sleepAbortable(500*time.Millisecond, cancel, dry) // let the parse settle
+	}
+	seekTS := cfg.ReplaySeekTimescale
+	rc.replayExec(fmt.Sprintf("timescale %d", seekTS), dry)
+	ffWall := wallMsForDemoMs(targetMs, float64(seekTS))
+	return rc.sleepAbortable(time.Duration(ffWall)*time.Millisecond, cancel, dry)
+}
+
+/* --------------------- auto-director prepare / trigger (Part 3) -------------- */
+
+// prepareAuto claims the replay slot and, in a goroutine, gets the replay
+// instance to the point where only the OBS cut + slow-mo playback remain: the
+// instance is up on the right mod, the demo is loaded and playing, seeked to
+// just before the window, and HELD at timescale 0. OBS stays on the live scene
+// the entire time, so any failure here never shows on the broadcast.
+//
+// HOLD CAVEAT: the hold uses `timescale 0`. Whether ET truly freezes the demo
+// parse at timescale 0 (vs. slowly drifting) could not be verified on the dev
+// box -- see docs. If it drifts, the played window will start late; disable
+// auto_replay and the known-working manual path (seek-and-play in one go) is
+// unaffected. The seek method is cfg.ReplaySeekMode.
+func (rc *replayController) prepareAuto(job replayJob) bool {
+	if !rc.begin(job) {
+		return false
+	}
+	go rc.runPrepare(job)
+	return true
+}
+
+func (rc *replayController) runPrepare(job replayJob) {
+	dry := cfg.DryRun
+	rc.mu.Lock()
+	cancel := rc.cancel
+	rc.mu.Unlock()
+
+	ok := func() bool {
+		if !dry {
+			if err := ensureReplayUp(job.mod, replayStartTimeout, cancel); err != nil {
+				log.Println("replay: prepare -- instance not ready:", err)
+				return false
+			}
+		} else {
+			log.Printf("replay: [dry-run] prepare demo %q (mod %q) -- would %s the replay instance",
+				job.path, job.mod, dryRunInstanceAction(job.mod))
+		}
+		rc.setPhase("loading")
+		if !rc.replayExec(demoLoadCommand(job.path), dry) {
+			log.Println("replay: prepare -- demo load failed (replay pipeline down)")
+			return false
+		}
+		if !dry && !waitReplayActive(replayActiveTimeout, cancel) {
+			log.Println("replay: prepare -- demo did not reach playback (timeout/abort)")
+			return false
+		}
+		rc.setPhase("seeking")
+		windowStart, _ := playbackWindow(job.offsetMs, job.preMs, job.postMs)
+		if !rc.seekTo(fastForwardUntilMs(windowStart, seekMarginMs), cancel, dry) {
+			return false
+		}
+		rc.replayExec("timescale 0", dry) // HOLD until the lull
+		return true
+	}()
+
+	if !ok {
+		rc.finish(dry) // failure -> OBS already on live, just release the slot
+		return
+	}
+	rc.mu.Lock()
+	rc.phase = "prepared"
+	rc.autoPrepared = true
+	rc.preparedAt = time.Now()
+	rc.mu.Unlock()
+	log.Printf("replay: prepared and holding %q -- waiting for a lull", job.file)
+}
+
+// triggerPrepared plays out a prepared replay: slow-mo, cut to the replay scene,
+// play the window, then finish() returns to live. Returns false if nothing is
+// prepared. Called when the auto-director detects a lull.
+func (rc *replayController) triggerPrepared() bool {
+	rc.mu.Lock()
+	if !rc.active || !rc.autoPrepared {
+		rc.mu.Unlock()
+		return false
+	}
+	rc.autoPrepared = false
+	job := rc.preparedJob
+	cancel := rc.cancel
+	rc.mu.Unlock()
+	go rc.runTrigger(job, cancel)
+	return true
+}
+
+func (rc *replayController) runTrigger(job replayJob, cancel <-chan struct{}) {
+	dry := cfg.DryRun
+	defer rc.finish(dry)
+	rc.setPhase("playing")
+	rc.replayExec(fmt.Sprintf("timescale %.3f", job.speed), dry)
+	if err := rc.cutScene("replay", dry); err != nil {
+		log.Println("replay: OBS switch to replay failed -- staying on live, aborting:", err)
+		return
+	}
+	windowStart, windowEnd := playbackWindow(job.offsetMs, job.preMs, job.postMs)
+	playWall := wallMsForDemoMs(windowEnd-windowStart, job.speed)
+	rc.sleepAbortable(time.Duration(playWall)*time.Millisecond, cancel, dry)
+}
+
+// discardPrepared aborts a holding preparation (lull never came, map changed,
+// or a better candidate appeared) and returns to idle. OBS is already on live.
+func (rc *replayController) discardPrepared() {
+	rc.mu.Lock()
+	holding := rc.active && rc.autoPrepared
+	rc.mu.Unlock()
+	if !holding {
+		return
+	}
+	log.Println("replay: discarding prepared replay")
+	rc.finish(cfg.DryRun)
 }
 
 /* ------------------------ replay instance lifecycle ------------------------- */

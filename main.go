@@ -435,7 +435,8 @@ func main() {
 	go audioMonitor()
 	go winAudioMonitor()
 	startSysMonitor(cfg.DiskPath)
-	setupReplay() // second (replay) instance + goroutines; no-op unless enabled
+	setupReplay()         // second (replay) instance + goroutines; no-op unless enabled
+	go autoDirectorLoop() // auto-replay director; inert unless auto_replay enabled
 	http.HandleFunc("/start", handleStart)
 	http.HandleFunc("/switch", handleSwitch)
 	http.HandleFunc("/exec", handleExec)
@@ -452,6 +453,7 @@ func main() {
 	http.HandleFunc("/replay/stop", handleReplayStop)
 	http.HandleFunc("/replay/status", handleReplayStatus)
 	http.HandleFunc("/director/config", handleDirectorConfig)
+	http.HandleFunc("/director/status", handleDirectorStatus)
 	log.Println("wolffiles-stream-agent v1.0.0 listening on", cfg.Listen)
 	log.Fatal(http.ListenAndServe(cfg.Listen, nil))
 }

@@ -48,6 +48,13 @@ type Config struct {
 	ReplaySpeed         float64 `json:"replay_speed"`          // playback timescale during the window, <1 = slow-mo (default 0.4)
 	ReplaySeekTimescale int     `json:"replay_seek_timescale"` // fast-forward timescale while seeking (default 8)
 	ReplayTitle         string  `json:"replay_title"`          // SDL/window title for the replay instance (default "WolfTV-Replay")
+	// ReplaySeekMode selects how the replay seeks to the highlight:
+	//   "timescale"   (default) play at ReplaySeekTimescale for a wall-clock-
+	//                 estimated duration -- the known-working manual path.
+	//   "fastforward" use the client's parse-level `fastforward` command, which
+	//                 advances demo server time directly (accurate, near-instant).
+	//                 Better on paper but unverified live; try it with an A/B.
+	ReplaySeekMode string `json:"replay_seek_mode"`
 
 	// The replay instance plays demos recorded by the LIVE instance out of one
 	// demo root under the shared fs_homepath, with a per-mod sub-directory
@@ -245,6 +252,9 @@ func loadConfig() {
 	}
 	if cfg.ReplayTitle == "" {
 		cfg.ReplayTitle = "WolfTV-Replay"
+	}
+	if cfg.ReplaySeekMode != "fastforward" {
+		cfg.ReplaySeekMode = "timescale" // default to the known-working seek
 	}
 	if cfg.ReplayProfile == "" {
 		cfg.ReplayProfile = "wolftv-replay"

@@ -283,6 +283,35 @@ func (f *eventFeed) addScan(s map[string]any) {
 	}
 }
 
+// isLullActionKind reports whether an event kind counts as "action" for lull
+// detection: kills and objective-class events. Chat/other do not break a lull.
+func isLullActionKind(kind string) bool {
+	switch kind {
+	case "kill", "selfkill", "dynamite_explode",
+		"objective_taken", "objective_secured", "checkpoint":
+		return true
+	}
+	return false
+}
+
+// quietForMs returns how long (ms) since the last action-class event, i.e. how
+// long the game has been "quiet". Returns a large value when there has been no
+// action at all in the ring. Used for lull detection (Part 3).
+func (f *eventFeed) quietForMs(now int64) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.events) - 1; i >= 0; i-- {
+		if isLullActionKind(f.events[i].Kind) {
+			d := now - f.events[i].Recv
+			if d < 0 {
+				d = 0
+			}
+			return d
+		}
+	}
+	return 1 << 62 // no action ever seen -> effectively infinite quiet
+}
+
 // segmentsSnapshot returns a copy of the current demo segments (oldest first).
 func (f *eventFeed) segmentsSnapshot() []DemoSegment {
 	f.mu.Lock()
