@@ -174,6 +174,9 @@ func autoDirectorLoop() {
 		dc := dcfg.get()
 		// inert unless auto-replay is on AND a replay instance exists to drive.
 		if !dc.AutoReplay || !cfg.ReplayEnabled || rp == nil {
+			// if auto was just turned off mid-preparation, reap it -- nothing
+			// else will (tick no longer runs). No-op for an idle/manual slot.
+			replay.discardPrepared()
 			continue
 		}
 		auto.tick(dc)
@@ -192,14 +195,22 @@ func (a *autoDirector) tick(dc DirectorConfig) {
 	// A map change invalidates per-map counters, used-highlight memory, and any
 	// preparation for the old map.
 	a.mu.Lock()
-	if liveMap != a.curMap {
+	mapChanged := liveMap != a.curMap
+	if mapChanged {
 		a.curMap = liveMap
 		a.mapReplays = 0
 		a.usedHighlights = map[string]bool{}
 		a.lastPlayerSlot = -1
 		a.preparedKey = ""
+		a.preparedPlayerSlot = -1
 	}
 	a.mu.Unlock()
+	// Drop any clip prepared for the old map -- its demo/highlight no longer
+	// belongs on the current broadcast. (Discard outside the lock; no-op unless
+	// something is actually holding.)
+	if mapChanged {
+		replay.discardPrepared()
+	}
 
 	// The broadcast must be healthy to do anything: live pipeline up and in a
 	// map (not mid map change / disconnect). Drop any hold otherwise.
@@ -246,8 +257,9 @@ func (a *autoDirector) tick(dc DirectorConfig) {
 	if capReached || !ok {
 		return
 	}
-	if time.Since(replay.lastDoneTime()) < time.Duration(dc.MinIntervalSec)*time.Second {
-		return // honour the minimum spacing between replays
+	if !replay.lastAiredTime().IsZero() &&
+		time.Since(replay.lastAiredTime()) < time.Duration(dc.MinIntervalSec)*time.Second {
+		return // honour the minimum spacing between replays that actually aired
 	}
 
 	absPath, err := demoAbsPath(cfg.LiveHomepath, cfg.ReplayDemoDir, best.Path)
@@ -333,11 +345,11 @@ func handleDirectorStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	sortCandidateStatus(views)
 
-	lastDone := replay.lastDoneTime()
+	lastAired := replay.lastAiredTime()
 	var lastReplayAt, nextEligibleAt int64
-	if !lastDone.IsZero() {
-		lastReplayAt = lastDone.Unix()
-		nextEligibleAt = lastDone.Add(time.Duration(dc.MinIntervalSec) * time.Second).Unix()
+	if !lastAired.IsZero() {
+		lastReplayAt = lastAired.Unix()
+		nextEligibleAt = lastAired.Add(time.Duration(dc.MinIntervalSec) * time.Second).Unix()
 	}
 
 	writeJSON(w, 200, map[string]any{

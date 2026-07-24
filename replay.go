@@ -507,9 +507,14 @@ type replayController struct {
 	offsetMs  int
 	startedAt int64
 	cancel    chan struct{}
-	lastDone  time.Time
+	lastDone  time.Time // when the slot was last released (any teardown) -- idle-stop timer
+	lastAired time.Time // when a replay last actually AIRED -- the min-interval spacing
 	// auto-director preparation (Part 3): the warm instance is loaded, seeked
 	// and held so that when the lull comes only the OBS cut + playback remain.
+	// auto marks the current job as director-driven (vs a manual /replay), so the
+	// director may tear it down (map change, auto disabled) without touching a
+	// manual replay.
+	auto         bool
 	autoPrepared bool
 	preparedAt   time.Time
 	preparedJob  replayJob
@@ -532,6 +537,7 @@ func (rc *replayController) begin(job replayJob) bool {
 	rc.offsetMs = job.offsetMs
 	rc.startedAt = time.Now().Unix()
 	rc.cancel = make(chan struct{})
+	rc.auto = false
 	rc.autoPrepared = false
 	rc.preparedJob = job
 	return true
@@ -595,21 +601,41 @@ func (rc *replayController) setPhase(p string) {
 }
 
 // stop aborts a running replay (or, if idle, just re-asserts the live scene).
+// A HELD preparation has no goroutine waiting on cancel, so closing cancel would
+// do nothing and leak the slot -- that case is torn down directly via finish().
 func (rc *replayController) stop() {
 	rc.mu.Lock()
-	if rc.active && rc.cancel != nil {
-		select {
-		case <-rc.cancel:
-		default:
-			close(rc.cancel)
+	held := rc.active && rc.autoPrepared
+	running := rc.active && !rc.autoPrepared && rc.cancel != nil
+	rc.mu.Unlock()
+	switch {
+	case running:
+		// a goroutine (run/runPrepare/runTrigger) is waiting on cancel
+		rc.mu.Lock()
+		if rc.cancel != nil {
+			select {
+			case <-rc.cancel:
+			default:
+				close(rc.cancel)
+			}
 		}
 		rc.mu.Unlock()
 		log.Println("replay: abort requested")
-		return
+	case held:
+		log.Println("replay: abort -- tearing down held preparation")
+		rc.finish(cfg.DryRun, false) // never aired -> do not consume the interval
+	default:
+		// idle: make sure OBS is on the live scene regardless.
+		_ = rc.cutScene("live", cfg.DryRun)
 	}
-	rc.mu.Unlock()
-	// idle: make sure OBS is on the live scene regardless.
-	_ = rc.cutScene("live", cfg.DryRun)
+}
+
+// lastAiredTime returns when a replay last actually aired (zero if none yet);
+// this, not lastDone, gates the minimum spacing between replays.
+func (rc *replayController) lastAiredTime() time.Time {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.lastAired
 }
 
 func (rc *replayController) status() map[string]any {
@@ -696,7 +722,7 @@ func (rc *replayController) run(job replayJob) {
 	rc.mu.Lock()
 	cancel := rc.cancel
 	rc.mu.Unlock()
-	defer rc.finish(dry)
+	defer rc.finish(dry, true) // a manual replay airs (or aborts mid-air)
 
 	// 1) ensure the replay instance is up, running the mod that recorded this
 	//    demo, and that the demo is playing.
@@ -746,7 +772,10 @@ func (rc *replayController) run(job replayJob) {
 
 // finish is the single exit point: reset timescale, ALWAYS return OBS to the
 // live scene, and mark the controller idle. Runs even on panic/early-return.
-func (rc *replayController) finish(dry bool) {
+// aired=true means a replay actually reached the broadcast (so it counts toward
+// the min-interval spacing); a failed/aborted preparation passes false so a
+// clip that never showed does not impose the full spacing on the next attempt.
+func (rc *replayController) finish(dry bool, aired bool) {
 	rc.setPhase("returning")
 	rc.replayExec("timescale 1", dry)
 	if err := rc.cutScene("live", dry); err != nil {
@@ -754,6 +783,7 @@ func (rc *replayController) finish(dry bool) {
 	}
 	rc.mu.Lock()
 	rc.active = false
+	rc.auto = false
 	rc.phase = "idle"
 	rc.file = ""
 	rc.mod = ""
@@ -763,6 +793,9 @@ func (rc *replayController) finish(dry bool) {
 	rc.preparedJob = replayJob{}
 	rc.preparedAt = time.Time{}
 	rc.lastDone = time.Now()
+	if aired {
+		rc.lastAired = time.Now()
+	}
 	rc.mu.Unlock()
 	log.Println("replay: done -- live scene restored")
 }
@@ -803,6 +836,9 @@ func (rc *replayController) prepareAuto(job replayJob) bool {
 	if !rc.begin(job) {
 		return false
 	}
+	rc.mu.Lock()
+	rc.auto = true // director-driven -> discardPrepared may tear it down
+	rc.mu.Unlock()
 	go rc.runPrepare(job)
 	return true
 }
@@ -842,7 +878,7 @@ func (rc *replayController) runPrepare(job replayJob) {
 	}()
 
 	if !ok {
-		rc.finish(dry) // failure -> OBS already on live, just release the slot
+		rc.finish(dry, false) // never aired -> release slot, don't consume the interval
 		return
 	}
 	rc.mu.Lock()
@@ -872,7 +908,7 @@ func (rc *replayController) triggerPrepared() bool {
 
 func (rc *replayController) runTrigger(job replayJob, cancel <-chan struct{}) {
 	dry := cfg.DryRun
-	defer rc.finish(dry)
+	defer rc.finish(dry, true) // a triggered replay airs
 	rc.setPhase("playing")
 	rc.replayExec(fmt.Sprintf("timescale %.3f", job.speed), dry)
 	if err := rc.cutScene("replay", dry); err != nil {
@@ -884,17 +920,34 @@ func (rc *replayController) runTrigger(job replayJob, cancel <-chan struct{}) {
 	rc.sleepAbortable(time.Duration(playWall)*time.Millisecond, cancel, dry)
 }
 
-// discardPrepared aborts a holding preparation (lull never came, map changed,
-// or a better candidate appeared) and returns to idle. OBS is already on live.
+// discardPrepared tears down an auto-director preparation -- whether it is
+// already holding or still in flight -- and returns to idle. A MANUAL replay is
+// never touched. Used when the lull never came, the map changed, a better
+// candidate appeared, or auto-replay was turned off. OBS is already on live.
 func (rc *replayController) discardPrepared() {
 	rc.mu.Lock()
-	holding := rc.active && rc.autoPrepared
-	rc.mu.Unlock()
-	if !holding {
+	if !rc.active || !rc.auto {
+		rc.mu.Unlock()
+		return // idle, or a manual replay is running -> leave it alone
+	}
+	if rc.autoPrepared {
+		// held: no goroutine is waiting on cancel, tear down directly.
+		rc.mu.Unlock()
+		log.Println("replay: discarding held preparation")
+		rc.finish(cfg.DryRun, false)
 		return
 	}
-	log.Println("replay: discarding prepared replay")
-	rc.finish(cfg.DryRun)
+	// in-flight prepare: a goroutine is in runPrepare waiting on cancel; closing
+	// it makes runPrepare bail and call finish() itself.
+	if rc.cancel != nil {
+		select {
+		case <-rc.cancel:
+		default:
+			close(rc.cancel)
+		}
+	}
+	rc.mu.Unlock()
+	log.Println("replay: aborting in-flight preparation")
 }
 
 /* ------------------------ replay instance lifecycle ------------------------- */

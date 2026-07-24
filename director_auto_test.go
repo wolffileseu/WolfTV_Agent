@@ -148,6 +148,95 @@ func TestAutoPrepareTriggerDryRun(t *testing.T) {
 	}
 }
 
+// BUG 2: stop() on a HELD preparation (no goroutine on cancel) must tear it
+// down, not leave the slot leaked.
+func TestStopTearsDownHeldPreparation(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.DryRun = true
+	cfg.SceneLive = "Live"
+	cfg.ReplaySeekMode = "timescale"
+
+	replay = replayController{}
+	job := replayJob{file: "h.dm_84", path: "silent/h.dm_84", mod: "silent", absPath: "C:\\h",
+		offsetMs: 20000, preMs: 8000, postMs: 5000, speed: 0.4}
+	if !replay.prepareAuto(job) {
+		t.Fatal("prepareAuto failed")
+	}
+	waitFor(t, 3*time.Second, func() bool { return replay.isPrepared() })
+	replay.stop()
+	if replay.isActive() {
+		t.Fatal("stop() on a held preparation must release the slot")
+	}
+}
+
+// BUG 1/4: a discarded preparation never aired, so it must not stamp lastAired
+// (which would impose the min-interval spacing on the next attempt).
+func TestDiscardedPrepDoesNotConsumeInterval(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.DryRun = true
+	cfg.SceneLive = "Live"
+	cfg.ReplaySeekMode = "timescale"
+
+	replay = replayController{}
+	job := replayJob{file: "i.dm_84", path: "silent/i.dm_84", mod: "silent", absPath: "C:\\i",
+		offsetMs: 20000, preMs: 8000, postMs: 5000, speed: 0.4}
+	if !replay.prepareAuto(job) {
+		t.Fatal("prepareAuto failed")
+	}
+	waitFor(t, 3*time.Second, func() bool { return replay.isPrepared() })
+	replay.discardPrepared()
+	if !replay.lastAiredTime().IsZero() {
+		t.Fatal("a discarded prep must not stamp lastAired")
+	}
+}
+
+// discardPrepared must never tear down a MANUAL replay (auto flag false).
+func TestDiscardLeavesManualReplayAlone(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.DryRun = true
+	cfg.SceneLive = "Live"
+
+	replay = replayController{}
+	job := replayJob{file: "m.dm_84", path: "silent/m.dm_84", mod: "silent", absPath: "C:\\m",
+		offsetMs: 20000, preMs: 8000, postMs: 5000, speed: 0.4}
+	if !replay.begin(job) { // manual claim (auto stays false), no goroutine started
+		t.Fatal("begin failed")
+	}
+	replay.discardPrepared()
+	if !replay.isActive() {
+		t.Fatal("discardPrepared must not touch a manual replay")
+	}
+	replay.finish(true, false) // cleanup
+}
+
+// a triggered replay DID air, so lastAired is stamped (spacing applies).
+func TestTriggeredReplaySetsLastAired(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.DryRun = true
+	cfg.SceneLive = "Live"
+	cfg.SceneReplay = "Replay"
+	cfg.ReplaySeekMode = "timescale"
+
+	replay = replayController{}
+	job := replayJob{file: "t.dm_84", path: "silent/t.dm_84", mod: "silent", absPath: "C:\\t",
+		offsetMs: 20000, preMs: 8000, postMs: 5000, speed: 0.4}
+	if !replay.prepareAuto(job) {
+		t.Fatal("prepareAuto failed")
+	}
+	waitFor(t, 3*time.Second, func() bool { return replay.isPrepared() })
+	if !replay.triggerPrepared() {
+		t.Fatal("trigger failed")
+	}
+	waitFor(t, 3*time.Second, func() bool { return !replay.isActive() })
+	if replay.lastAiredTime().IsZero() {
+		t.Fatal("a triggered (aired) replay must stamp lastAired")
+	}
+}
+
 func TestDiscardPreparedReturnsIdle(t *testing.T) {
 	old := cfg
 	defer func() { cfg = old }()
