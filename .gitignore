@@ -10,6 +10,8 @@ dist/
 # logs / runtime
 *.log
 agent.log
+director.json
+director.json.tmp
 
 # editor / os
 .DS_Store

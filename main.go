@@ -419,6 +419,7 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	loadConfig()
+	loadDirectorConfig()
 	if cfg.LogFile != "" {
 		if f, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 			log.SetOutput(io.MultiWriter(os.Stdout, f))
@@ -449,6 +450,7 @@ func main() {
 	http.HandleFunc("/replay/segments", handleReplaySegments)
 	http.HandleFunc("/replay/stop", handleReplayStop)
 	http.HandleFunc("/replay/status", handleReplayStatus)
+	http.HandleFunc("/director/config", handleDirectorConfig)
 	log.Println("wolffiles-stream-agent v1.0.0 listening on", cfg.Listen)
 	log.Fatal(http.ListenAndServe(cfg.Listen, nil))
 }

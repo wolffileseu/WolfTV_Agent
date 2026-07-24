@@ -165,6 +165,10 @@ const defaultConfig = `{
 }
 `
 
+// configPath is where config.json was read from; director.json (the runtime,
+// panel-editable director settings) is written next to it.
+var configPath = "config.json"
+
 func loadConfig() {
 	path := "config.json"
 	dryFlag := false
@@ -175,6 +179,7 @@ func loadConfig() {
 		}
 		path = a // first non-flag argument is the config path
 	}
+	configPath = path
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		if werr := os.WriteFile(path, []byte(defaultConfig), 0644); werr != nil {
