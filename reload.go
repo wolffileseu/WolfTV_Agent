@@ -53,6 +53,12 @@ func configChanges(old, next Config) (changed, needsRestart []string) {
 	rst("replay_enabled", old.ReplayEnabled != next.ReplayEnabled)
 	rst("resolution", old.Resolution != next.Resolution) // only read at ET launch
 	rst("log_file", old.LogFile != next.LogFile)         // log sink set at startup
+	// Twitch client + goroutine are built at startup from these -> restart.
+	rst("twitch_enabled", old.TwitchEnabled != next.TwitchEnabled)
+	rst("twitch_client_id", old.TwitchClientID != next.TwitchClientID)
+	rst("twitch_client_secret", old.TwitchClientSecret != next.TwitchClientSecret)
+	rst("twitch_refresh_token", old.TwitchRefreshToken != next.TwitchRefreshToken)
+	rst("twitch_broadcaster_id", old.TwitchBroadcasterID != next.TwitchBroadcasterID)
 
 	// --- applies live (re-read by the goroutines that use them) ---
 	hot("scene_live", old.SceneLive != next.SceneLive)
@@ -88,6 +94,7 @@ func configChanges(old, next Config) (changed, needsRestart []string) {
 	hot("replay_demo_dir", old.ReplayDemoDir != next.ReplayDemoDir)
 	hot("post_connect_exec", !equalStrs(old.PostConnectExec, next.PostConnectExec))
 	hot("dry_run", old.DryRun != next.DryRun)
+	hot("twitch_title_template", old.TwitchTitleTemplate != next.TwitchTitleTemplate)
 	return changed, needsRestart
 }
 
@@ -129,6 +136,7 @@ func applyLiveConfig(n *Config) {
 	cfg.ReplayDemoDir = n.ReplayDemoDir
 	cfg.PostConnectExec = n.PostConnectExec
 	cfg.DryRun = n.DryRun
+	cfg.TwitchTitleTemplate = n.TwitchTitleTemplate
 
 	// side-effect: the disk monitor captured its path at startup, so nudge it.
 	if sysmon != nil {

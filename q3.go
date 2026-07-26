@@ -21,11 +21,22 @@ func cleanName(s string) string {
 	return strings.TrimSpace(colorRE.ReplaceAllString(s, ""))
 }
 
-// q3GetStatus queries a server, returns its players.
-func q3GetStatus(addr string) ([]q3Player, bool) {
+// parseInfoString parses a Quake3 "\key\value\key\value" infostring into a map.
+func parseInfoString(s string) map[string]string {
+	m := map[string]string{}
+	parts := strings.Split(strings.Trim(s, `\`), `\`)
+	for i := 0; i+1 < len(parts); i += 2 {
+		m[parts[i]] = parts[i+1]
+	}
+	return m
+}
+
+// q3GetStatusInfo queries a server and returns both the parsed serverinfo
+// (sv_hostname, gamename, mapname, ...) and the player list.
+func q3GetStatusInfo(addr string) (map[string]string, []q3Player, bool) {
 	conn, err := net.DialTimeout("udp", addr, 2*time.Second)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(2 * time.Second))
@@ -33,10 +44,14 @@ func q3GetStatus(addr string) ([]q3Player, bool) {
 	buf := make([]byte, 16384)
 	n, err := conn.Read(buf)
 	if err != nil || n < 4 || !bytes.HasPrefix(buf, []byte("\xff\xff\xff\xff")) {
-		return nil, false
+		return nil, nil, false
+	}
+	lines := strings.Split(string(buf[:n]), "\n")
+	var info map[string]string
+	if len(lines) > 1 {
+		info = parseInfoString(lines[1]) // line 0 = header, line 1 = serverinfo
 	}
 	var players []q3Player
-	lines := strings.Split(string(buf[:n]), "\n")
 	for i, l := range lines {
 		if i < 2 { // header + serverinfo
 			continue
@@ -56,7 +71,13 @@ func q3GetStatus(addr string) ([]q3Player, bool) {
 		}
 		players = append(players, q3Player{Name: l[q1+1 : q2], Ping: ping})
 	}
-	return players, true
+	return info, players, true
+}
+
+// q3GetStatus queries a server, returns its players.
+func q3GetStatus(addr string) ([]q3Player, bool) {
+	_, players, ok := q3GetStatusInfo(addr)
+	return players, ok
 }
 
 func serverAlive(addr string) (int, bool) {

@@ -452,6 +452,7 @@ func main() {
 	startGPUMonitor()     // nvidia-smi sampler; silently inert without an NVIDIA card
 	setupReplay()         // second (replay) instance + goroutines; no-op unless enabled
 	go autoDirectorLoop() // auto-replay director; inert unless auto_replay enabled
+	setupTwitch()         // title + markers; no-op unless twitch_enabled
 	http.HandleFunc("/start", handleStart)
 	http.HandleFunc("/switch", handleSwitch)
 	http.HandleFunc("/exec", handleExec)
@@ -472,6 +473,7 @@ func main() {
 	http.HandleFunc("/restart", handleRestart)
 	http.HandleFunc("/director/config", handleDirectorConfig)
 	http.HandleFunc("/director/status", handleDirectorStatus)
+	http.HandleFunc("/twitch/status", handleTwitchStatus)
 	log.Println("wolftv-agent v1.0.0 listening on", cfg.Listen)
 	// serveWithRetry (not ListenAndServe) so a /restart handoff can rebind the
 	// port once the previous process releases it.

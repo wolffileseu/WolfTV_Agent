@@ -51,6 +51,7 @@ All endpoints require `Authorization: Bearer <token>`.
 | `/replay/status` | GET | current replay phase/state                  |
 | `/director/config` | GET/POST | read / live-update the auto-director settings |
 | `/director/status` | GET | what the auto-director is currently thinking |
+| `/twitch/status` | GET | Twitch auth / title / marker state |
 
 ## Two-instance model & replay cinema
 
@@ -399,6 +400,86 @@ silent-broadcast-death bug and has been removed.)
 The agent's control port lets a caller drive your stream and run client
 console commands. **Firewall the port to the panel host only** and use a long
 random `token`. Never expose it to the open internet with the default token.
+
+## Twitch integration
+
+Optional. The agent can set the channel **title** on every server switch and
+drop **stream markers** on replays. Everything is inert unless
+`twitch_enabled`, and — like the replay path — a Twitch failure never disturbs
+the broadcast or blocks a switch; it just logs.
+
+### One-time authorization (do this once, as the channel owner)
+
+The agent needs a token with the `channel:manage:broadcast` scope. User access
+tokens expire in ~4 h, so the agent stores a **refresh token** and mints access
+tokens itself. Minting the refresh token is a one-time manual step:
+
+1. **Register an application** at
+   [dev.twitch.tv/console/apps](https://dev.twitch.tv/console/apps): OAuth
+   redirect URL `http://localhost:3000`, category anything. Note the
+   **Client ID** and generate a **Client Secret**.
+
+2. **Authorize once** (the channel owner must be the one who authorizes). Open
+   this URL in a browser logged in as the channel account, replacing
+   `CLIENT_ID`:
+
+   ```
+   https://id.twitch.tv/oauth2/authorize?client_id=CLIENT_ID&redirect_uri=http://localhost:3000&response_type=code&scope=channel:manage:broadcast
+   ```
+
+   Approve. The browser redirects to `http://localhost:3000/?code=AUTH_CODE&...`
+   (the page won't load — that's fine). Copy the `code` value from the address
+   bar.
+
+3. **Exchange the code for a refresh token** (the code is valid for a few
+   minutes). Run once, substituting `CLIENT_ID`, `CLIENT_SECRET`, `AUTH_CODE`:
+
+   ```sh
+   curl -s -X POST https://id.twitch.tv/oauth2/token \
+     -d client_id=CLIENT_ID \
+     -d client_secret=CLIENT_SECRET \
+     -d code=AUTH_CODE \
+     -d grant_type=authorization_code \
+     -d redirect_uri=http://localhost:3000
+   ```
+
+   The JSON reply contains `refresh_token` — that's the durable one to keep
+   (the `access_token` in the same reply is short-lived and the agent will
+   fetch its own).
+
+4. Put the three values in `config.json`:
+
+   ```json
+   "twitch_enabled": true,
+   "twitch_client_id": "…",
+   "twitch_client_secret": "…",
+   "twitch_refresh_token": "…",
+   "twitch_broadcaster_id": "",
+   "twitch_title_template": "Wolffiles.eu 24/7 ET | {map} @ {server} | /connect {serverip}"
+   ```
+
+`twitch_broadcaster_id` is resolved from the token on first use if left blank.
+If the refresh token is ever rejected (revoked, or a wrong client secret), the
+agent logs a clear one-time error and disables Twitch for the session — re-run
+the authorization above and restart.
+
+### Title
+
+On each server switch, once the live instance settles on a map, the channel
+title is set from `twitch_title_template`. Placeholders: `{map}`, `{server}`
+(hostname, colour codes stripped), `{serverip}` (ip:port), `{mod}`,
+`{players}`. Unknown/unset placeholders render empty (never the literal token).
+Twitch is only called when the resolved title actually changes.
+
+The title is capped at Twitch's 140 characters, truncated on a word boundary.
+The default template ends with a plain-text `/connect {serverip}` (not
+clickable on Twitch) — with a long server hostname the 140-cap truncates the
+tail (the IP) first. That's an accepted trade-off; the agent drops the whole
+`/connect {serverip}` tail rather than emit a half-written address.
+
+`twitch_title_template` is hot-reloadable (`/reload`); the credentials need a
+restart. `GET /twitch/status` reports `{ enabled, authorized, broadcaster,
+current_title }`.
 
 ## Platform notes
 

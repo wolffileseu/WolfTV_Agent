@@ -242,6 +242,12 @@ func (in *instance) pipeLoop() {
 				} else if in.tele.State != "disconnected" {
 					in.discSince = time.Time{} // recovered -> clear timer
 				}
+				// Twitch: refresh the channel title once the LIVE instance has
+				// settled on a map. twitchOnTelemetry dedupes on (map, server), so
+				// this only acts on an actual switch/map change, never per tick.
+				if in.directs {
+					twitchOnTelemetry(in.tele.State, in.tele.Map, in.currentServer)
+				}
 			}
 			in.mu.Unlock()
 		}

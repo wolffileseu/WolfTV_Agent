@@ -53,5 +53,13 @@
   "_comment_dry_run": "Exercise the whole replay orchestration WITHOUT spawning ET or touching OBS (every command/scene-cut/wait is logged). Also settable with the -dry-run CLI flag.",
   "dry_run": false,
 
+  "_comment_twitch": "Twitch integration (README has the one-time authorization flow). Inert unless twitch_enabled. A Twitch failure never disturbs the broadcast or blocks a switch. Get client_id/client_secret from dev.twitch.tv/console/apps and mint refresh_token once with scope channel:manage:broadcast. broadcaster_id is resolved from the token if blank. Title placeholders: {map} {server} (hostname, colour codes stripped) {serverip} {mod} {players}; unknown tokens render empty; the title is capped at 140 chars on a word boundary and the whole '/connect {serverip}' tail is dropped rather than showing a half-written IP.",
+  "twitch_enabled": false,
+  "twitch_client_id": "",
+  "twitch_client_secret": "",
+  "twitch_refresh_token": "",
+  "twitch_broadcaster_id": "",
+  "twitch_title_template": "Wolffiles.eu 24/7 ET | {map} @ {server} | /connect {serverip}",
+
   "_comment_director": "The automatic replay director's runtime settings (auto_replay on/off, heat weighting, lull threshold, min interval, min highlight age, per-map cap, playback window) are NOT here -- they live in director.json next to this file so they can be tuned live via POST /director/config without editing this hand-maintained file. director.json is created on first update; see the README. auto_replay defaults to false."
 }

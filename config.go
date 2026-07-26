@@ -94,6 +94,17 @@ type Config struct {
 
 	LogFile string `json:"log_file"` // "" = console only, default "wolffiles-agent.log"
 
+	// --- Twitch integration -------------------------------------------------
+	// All inert unless twitch_enabled. A Twitch failure must NEVER disturb the
+	// broadcast or block a server switch -- everything runs off the hot path and
+	// only logs on error.
+	TwitchEnabled       bool   `json:"twitch_enabled"`
+	TwitchClientID      string `json:"twitch_client_id"`
+	TwitchClientSecret  string `json:"twitch_client_secret"`
+	TwitchRefreshToken  string `json:"twitch_refresh_token"`  // minted once (see README)
+	TwitchBroadcasterID string `json:"twitch_broadcaster_id"` // resolved from the token if blank
+	TwitchTitleTemplate string `json:"twitch_title_template"` // placeholders: {map} {server} {serverip} {mod} {players}
+
 	// system monitor: volume reported by /system; "" = auto (C:\ or /)
 	DiskPath string `json:"disk_path"`
 
