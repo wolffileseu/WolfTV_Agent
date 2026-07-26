@@ -23,7 +23,8 @@ func (in *instance) spawn(args []string) error {
 		return err
 	}
 	in.etCmd = cmd
-	in.adopted = false // we now manage a real child process, not an adopted one
+	in.adopted = false               // we now manage a real child process, not an adopted one
+	in.restartDeadline = time.Time{} // no handoff grace for a freshly spawned instance
 	in.startedAt = time.Now()
 	done := make(chan struct{})
 	in.etDone = done
@@ -114,6 +115,7 @@ func deploy(servers []string, password, overlayURL string) (string, error) {
 			st.tele.State = "connecting" // expected brief disconnect follows
 			st.discSince = time.Time{}
 			resetDirectorLocked()
+			persistLiveStateLocked() // an adopting agent must be able to relaunch this
 			go setOverlayURL(st.overlayURL)
 			return target, nil
 		}
@@ -125,6 +127,7 @@ func deploy(servers []string, password, overlayURL string) (string, error) {
 	if err := startET(target, password); err != nil {
 		return "", err
 	}
+	persistLiveStateLocked()
 	go setOverlayURL(st.overlayURL)
 	return target, nil
 }
@@ -270,6 +273,64 @@ func directorLoop() {
 
 /* ---------------- watchdog ---------------- */
 
+// adoptGraceSec is the ONLY time the watchdog is hands-off about ET liveness:
+// the brief window after adopting a running ET (e.g. across a /restart) while
+// its control pipe reattaches. After it expires the instance is watched exactly
+// like a spawned one -- an adopted ET is never permanently unwatched again.
+const adoptGraceSec = 15
+
+type wdAction int
+
+const (
+	wdLeave    wdAction = iota // ET is alive (or in the restart grace) -- don't relaunch
+	wdRelaunch                 // ET is dead and we know where to bring it back
+	wdErrorLog                 // ET is dead and we CANNOT relaunch (loud, every cycle)
+)
+
+func (a wdAction) String() string {
+	switch a {
+	case wdRelaunch:
+		return "relaunch"
+	case wdErrorLog:
+		return "error"
+	default:
+		return "leave"
+	}
+}
+
+// watchdogAction is the core liveness decision, pure so it is exhaustively
+// tested. It does NOT depend on spawned-vs-adopted: adoption only changes how
+// etAlive is computed (see liveEtAlive), never whether the watchdog acts. The
+// failure this fixes -- adopted + dead + server known -> silence -- is now
+// exactly wdRelaunch; adopted + dead + server unknown is wdErrorLog, not
+// silence.
+func watchdogAction(etAlive, serverKnown, withinRestartGrace bool) wdAction {
+	if etAlive {
+		return wdLeave // never relaunch a live ET (no double-spawn)
+	}
+	if withinRestartGrace {
+		return wdLeave // deliberate /restart handoff in progress -- give the pipe a moment
+	}
+	if serverKnown {
+		return wdRelaunch // dead and we know the pool -> bring it back
+	}
+	return wdErrorLog // dead and no idea where -> alert loudly, do not go silent
+}
+
+// liveEtAlive reports whether the live ET is considered running. A spawned
+// instance is alive while it holds a process handle (etCmd). An adopted instance
+// has no handle, so it is judged by its control pipe: alive while the pipe is up
+// or dropped only very recently (transient-drop tolerance = deadAfter).
+func liveEtAlive(etCmdPresent, adopted, pipeUp bool, sinceLastEvent, deadAfter time.Duration) bool {
+	if etCmdPresent {
+		return true
+	}
+	if adopted {
+		return pipeUp || sinceLastEvent <= deadAfter
+	}
+	return false
+}
+
 func watchdog() {
 	for {
 		time.Sleep(time.Duration(cfg.WatchIntervalSec) * time.Second)
@@ -278,23 +339,48 @@ func watchdog() {
 			st.mu.Unlock()
 			continue
 		}
-		// An adopted ET (running from before an agent restart) with no server
-		// pool can't be relaunched by us, so the watchdog stays hands-off: it
-		// must never kill a broadcast it cannot bring back, nor spawn a second
-		// ET. A panel /start (which sets servers and spawns, clearing adopted)
-		// hands normal management back.
-		if st.adopted && len(st.servers) == 0 {
+		// 1) liveness. A spawned instance is dead when its handle is gone; an
+		// adopted one when its pipe has been down past the transient window.
+		// Whichever it is, a dead live ET is ALWAYS acted on -- never left
+		// silently unwatched (the overnight-outage bug).
+		etAlive := liveEtAlive(st.etCmd != nil, st.adopted, st.pipeUp,
+			time.Since(st.lastEvent), time.Duration(cfg.TeleTimeoutSec)*time.Second)
+		withinGrace := !st.restartDeadline.IsZero() && time.Now().Before(st.restartDeadline)
+		serverKnown := len(st.servers) > 0
+		adopted := st.adopted
+
+		switch watchdogAction(etAlive, serverKnown, withinGrace) {
+		case wdErrorLog:
 			st.mu.Unlock()
+			// dead, adopted, and we lack a server pool to relaunch (no/empty
+			// live-state.json). Loud, every cycle -- silence was the failure.
+			log.Println("watchdog: adopted instance down and cannot relaunch -- " +
+				"no server pool recovered (live-state.json missing or empty); " +
+				"issue /start from the panel to restore the broadcast")
 			continue
-		}
-		// 1) process dead (an adopted instance is alive via its pipe, not etCmd)
-		if st.etCmd == nil && !st.adopted {
+		case wdRelaunch:
+			st.mu.Unlock()
+			// double-spawn guard: for an adopted instance, confirm ET is really
+			// gone (a slow pipe reattach could otherwise trigger a second ET).
+			if adopted && pipeReachable(cfg.PipeAddr) {
+				log.Println("watchdog: adopted ET still answering its pipe -- not relaunching (pipe reattaching)")
+				continue
+			}
 			log.Println("watchdog: et dead -> relaunch")
+			st.mu.Lock()
 			if _, err := deploy(st.servers, st.password, ""); err != nil {
 				log.Println("watchdog: relaunch failed:", err)
 			}
 			st.mu.Unlock()
 			continue
+		case wdLeave:
+			if !etAlive {
+				// dead but within the brief restart-handoff grace: wait for the
+				// pipe to reattach, do not run the alive-instance checks yet.
+				st.mu.Unlock()
+				continue
+			}
+			// alive -> fall through to the frozen/disconnected/reachability checks.
 		}
 		// 2) pipeline silent too long (client frozen)
 		if cfg.PipeAddr != "" && st.pipeUp &&
@@ -321,6 +407,13 @@ func watchdog() {
 		server := st.currentServer
 		pipeUp := st.pipeUp
 		st.mu.Unlock()
+
+		// Can't run the reachability check without knowing the server (a
+		// just-adopted instance may not have learned it from telemetry yet).
+		// Skip rather than misread "" as unreachable and needlessly redeploy.
+		if server == "" {
+			continue
+		}
 
 		// 4+5) ONE status query (with retries against flood protection) used
 		// for both the reachability check and the no-pipeline name check.

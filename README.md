@@ -370,12 +370,21 @@ replay scene.
 
 **The live ET is left running** and the new process re-attaches to it through
 the control pipe (adoption), so the broadcast is seamless across the restart —
-provided the pipeline can reconnect, which it now can (the stock pipeline dialed
-only when it owned the ET child handle; adoption was added so re-attach works).
-While adopted with no server pool, the watchdog stays hands-off: it can't
-relaunch ET, so it must never kill a broadcast it can't bring back — a later
-panel `/start` hands normal management back. On startup the agent also adopts
-any ET already answering the pipe, so a crash-restart re-attaches too.
+the pipeline reconnects (it dials on an adopted instance too), and the new
+process **recovers the server pool / password / overlay from `live-state.json`**
+(written next to `config.json` on every deploy) so it can keep *and relaunch*
+the broadcast. On startup the agent also adopts any ET already answering the
+pipe, so a crash-restart re-attaches too.
+
+An **adopted ET is fully watched, exactly like a spawned one** — it just judges
+liveness by its control pipe instead of a child-process handle. If it dies, the
+watchdog relaunches it from the recovered pool. The only hands-off state is a
+brief (~15 s) grace right after adoption while the pipe reattaches; after that
+the instance is watched normally. If an adopted ET dies and no `live-state.json`
+was recoverable, the watchdog logs a **loud error every cycle**
+(`adopted instance down and cannot relaunch — …`) rather than going silent, and
+a panel `/start` restores it. (A permanent hands-off state was a
+silent-broadcast-death bug and has been removed.)
 
 > This is a **spawn-and-exit**, not a Windows service restart. The agent must be
 > started from the **interactive session** (ET needs a desktop and GPU access),

@@ -41,11 +41,14 @@ type instance struct {
 	nameFails     int
 
 	// adopted: this instance's ET was already running when the agent started
-	// (e.g. across a /restart) and is being managed through the control pipe
-	// rather than a child-process handle. Set by adoptLiveET, cleared by spawn.
-	// While adopted with no server pool, the watchdog stays hands-off (it has no
-	// way to relaunch, so it must not kill what it cannot bring back).
+	// (e.g. across a /restart) and is managed through the control pipe rather
+	// than a child-process handle. Set by adoptLiveET, cleared by spawn. An
+	// adopted instance is still fully watched (it just judges liveness by the
+	// pipe, not a child handle) -- see the watchdog.
 	adopted bool
+	// restartDeadline bounds the ONE hands-off window: the brief grace after
+	// adopting an ET while its pipe reattaches. Zero except during that window.
+	restartDeadline time.Time
 
 	// pipeline
 	pipe          net.Conn
