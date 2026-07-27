@@ -479,7 +479,19 @@ tail (the IP) first. That's an accepted trade-off; the agent drops the whole
 
 `twitch_title_template` is hot-reloadable (`/reload`); the credentials need a
 restart. `GET /twitch/status` reports `{ enabled, authorized, broadcaster,
-current_title }`.
+current_title, last_marker_at }`.
+
+### Stream markers
+
+With `twitch_markers_enabled`, a [stream marker](https://help.twitch.tv/s/article/creating-highlights-and-stream-markers)
+— a timestamped bookmark in the VOD — is dropped whenever a replay airs (auto
+or manual), e.g. `Replay: Triple kill by Rambo on goldrush`. With
+`twitch_marker_highlights` (default **off**), high-value highlights (triple
+kill and up) are also marked even without a replay.
+
+Markers are rate-limited (one per few seconds) and only created while the
+channel is actually live — if the stream is down, they're skipped silently.
+Both flags are hot-reloadable.
 
 ## Platform notes
 

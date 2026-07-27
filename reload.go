@@ -95,6 +95,8 @@ func configChanges(old, next Config) (changed, needsRestart []string) {
 	hot("post_connect_exec", !equalStrs(old.PostConnectExec, next.PostConnectExec))
 	hot("dry_run", old.DryRun != next.DryRun)
 	hot("twitch_title_template", old.TwitchTitleTemplate != next.TwitchTitleTemplate)
+	hot("twitch_markers_enabled", old.TwitchMarkersEnabled != next.TwitchMarkersEnabled)
+	hot("twitch_marker_highlights", old.TwitchMarkerHighlights != next.TwitchMarkerHighlights)
 	return changed, needsRestart
 }
 
@@ -137,6 +139,8 @@ func applyLiveConfig(n *Config) {
 	cfg.PostConnectExec = n.PostConnectExec
 	cfg.DryRun = n.DryRun
 	cfg.TwitchTitleTemplate = n.TwitchTitleTemplate
+	cfg.TwitchMarkersEnabled = n.TwitchMarkersEnabled
+	cfg.TwitchMarkerHighlights = n.TwitchMarkerHighlights
 
 	// side-effect: the disk monitor captured its path at startup, so nudge it.
 	if sysmon != nil {

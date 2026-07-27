@@ -43,6 +43,7 @@ type autoCandidate struct {
 	SvTime     int    `json:"svtime"`
 	OffsetMs   int    `json:"offset_ms"`
 	AgeMs      int64  `json:"age_ms"`
+	Label      string `json:"label"` // e.g. "Triple kill by X" -- for the Twitch marker
 }
 
 // candKey uniquely identifies a highlight so the same one is never replayed
@@ -84,6 +85,7 @@ func buildAutoCandidates(segs []DemoSegment, hls []Highlight, now int64, liveMap
 				Score: h.Score, SvTime: h.SvTime,
 				OffsetMs: offsetFromSvtime(h.SvTime, seg.StartSv),
 				AgeMs:    now - h.Recv,
+				Label:    highlightLabel(h),
 			})
 		}
 	}
@@ -139,6 +141,7 @@ func candidateToJob(c autoCandidate, dc DirectorConfig, absPath string) replayJo
 		file: c.File, path: c.Path, mod: c.Mod, absPath: absPath,
 		offsetMs: c.OffsetMs,
 		preMs:    dc.PreSec * 1000, postMs: dc.PostSec * 1000, speed: dc.Speed,
+		mapName: c.Map, label: c.Label,
 	}
 }
 

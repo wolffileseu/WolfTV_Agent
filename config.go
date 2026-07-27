@@ -104,6 +104,11 @@ type Config struct {
 	TwitchRefreshToken  string `json:"twitch_refresh_token"`  // minted once (see README)
 	TwitchBroadcasterID string `json:"twitch_broadcaster_id"` // resolved from the token if blank
 	TwitchTitleTemplate string `json:"twitch_title_template"` // placeholders: {map} {server} {serverip} {mod} {players}
+	// TwitchMarkersEnabled drops a stream marker when a replay airs.
+	TwitchMarkersEnabled bool `json:"twitch_markers_enabled"`
+	// TwitchMarkerHighlights additionally marks high-value highlights even
+	// without a replay. Default off so markers don't flood the VOD.
+	TwitchMarkerHighlights bool `json:"twitch_marker_highlights"`
 
 	// system monitor: volume reported by /system; "" = auto (C:\ or /)
 	DiskPath string `json:"disk_path"`

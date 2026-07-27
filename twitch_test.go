@@ -103,11 +103,19 @@ type fakeTransport struct {
 	refreshCalls int
 	userCalls    int
 	titleCalls   []string
+	markerCalls  []string
+	liveResult   bool
 	refreshErr   error
 	newToken     string
 	expiresSec   int
 	bid          string
 	unauth401    int // return 401 from setTitle this many times, then succeed
+}
+
+func (f *fakeTransport) isLive(id, tok, bid string) (bool, error) { return f.liveResult, nil }
+func (f *fakeTransport) marker(id, tok, bid, desc string) error {
+	f.markerCalls = append(f.markerCalls, desc)
+	return nil
 }
 
 func (f *fakeTransport) refresh(id, sec, rt string) (string, string, int, error) {
@@ -197,6 +205,80 @@ func TestTwitchRefreshRejectedDisables(t *testing.T) {
 	}
 	if len(f.titleCalls) != 0 {
 		t.Errorf("disabled client must not set titles")
+	}
+}
+
+/* -------- Part 2: markers -------- */
+
+func TestMarkerAllowedRateLimit(t *testing.T) {
+	base := time.Unix(1_000_000, 0)
+	min := 8 * time.Second
+	if !markerAllowed(time.Time{}, base, min) {
+		t.Error("first marker (no prior) must be allowed")
+	}
+	if markerAllowed(base, base.Add(3*time.Second), min) {
+		t.Error("a marker 3s after the last must be rate-limited")
+	}
+	if !markerAllowed(base, base.Add(9*time.Second), min) {
+		t.Error("a marker 9s after the last must be allowed")
+	}
+}
+
+func TestMarkerDescription(t *testing.T) {
+	if got := markerDescription("Replay", "Triple kill by Rambo", "goldrush"); got != "Replay: Triple kill by Rambo on goldrush" {
+		t.Errorf("desc = %q", got)
+	}
+	if got := markerDescription("Replay", "", "supply"); got != "Replay on supply" {
+		t.Errorf("no-label desc = %q", got)
+	}
+	// capped at 140 on a word boundary
+	long := markerDescription("Replay", strings.Repeat("word ", 40), "map")
+	if len([]rune(long)) > maxMarkerLen {
+		t.Errorf("marker not capped: %d", len([]rune(long)))
+	}
+}
+
+func TestTwitchMarkerSkipsWhenNotLive(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.TwitchMarkersEnabled = true
+	f := &fakeTransport{liveResult: false}
+	tc := newTestTwitch(f)
+	tc.marker("Replay: X on goldrush")
+	if len(f.markerCalls) != 0 {
+		t.Errorf("marker must be skipped when the stream is not live, got %v", f.markerCalls)
+	}
+}
+
+func TestTwitchMarkerRateLimited(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.TwitchMarkersEnabled = true
+
+	base := time.Unix(1_000_000, 0)
+	clk := base
+	f := &fakeTransport{liveResult: true}
+	tc := newTestTwitch(f)
+	tc.now = func() time.Time { return clk }
+
+	tc.marker("first")            // allowed
+	tc.marker("second, too soon") // rate-limited (same instant)
+	clk = base.Add(10 * time.Second)
+	tc.marker("third, after gap") // allowed again
+	if len(f.markerCalls) != 2 || f.markerCalls[0] != "first" || f.markerCalls[1] != "third, after gap" {
+		t.Errorf("rate-limit wrong, got %v", f.markerCalls)
+	}
+}
+
+func TestTwitchMarkerDisabledByFlag(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.TwitchMarkersEnabled = false // markers off
+	f := &fakeTransport{liveResult: true}
+	tc := newTestTwitch(f)
+	tc.marker("Replay: X")
+	if len(f.markerCalls) != 0 {
+		t.Errorf("markers disabled: must not call Twitch, got %v", f.markerCalls)
 	}
 }
 

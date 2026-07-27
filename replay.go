@@ -372,6 +372,32 @@ func stripArg(args []string, flag string) []string {
 	return out
 }
 
+// nearestHighlightLabel returns the label of the highlight in seg closest in
+// svtime to targetSv, for a manual replay's Twitch marker. "" if none.
+func nearestHighlightLabel(seg DemoSegment, targetSv int) string {
+	hls := feed.highlightsSnapshot()
+	best, bestDist := -1, int(^uint(0)>>1)
+	for i, h := range hls {
+		if !svtimeInSegment(h.SvTime, seg) {
+			continue
+		}
+		if h.Map != "" && seg.Map != "" && h.Map != seg.Map {
+			continue
+		}
+		d := h.SvTime - targetSv
+		if d < 0 {
+			d = -d
+		}
+		if best < 0 || d < bestDist {
+			best, bestDist = i, d
+		}
+	}
+	if best < 0 {
+		return ""
+	}
+	return highlightLabel(hls[best])
+}
+
 // highlightLabel renders a short human label for a highlight.
 func highlightLabel(h Highlight) string {
 	who := h.Player
@@ -498,6 +524,8 @@ type replayJob struct {
 	preMs    int
 	postMs   int
 	speed    float64
+	mapName  string // for the Twitch stream marker
+	label    string // highlight label for the marker, e.g. "Triple kill by X"
 }
 
 type replayController struct {
@@ -765,6 +793,9 @@ func (rc *replayController) run(job replayJob) {
 		log.Println("replay: OBS switch to replay failed -- staying on live, aborting:", err)
 		return
 	}
+	if !dry {
+		twitchMarkerReplay(job.label, job.mapName) // Twitch marker as the replay airs
+	}
 
 	// 4) play the window at slow speed, then finish() cuts back to live.
 	windowMs := windowEnd - windowStart
@@ -916,6 +947,9 @@ func (rc *replayController) runTrigger(job replayJob, cancel <-chan struct{}) {
 	if err := rc.cutScene("replay", dry); err != nil {
 		log.Println("replay: OBS switch to replay failed -- staying on live, aborting:", err)
 		return
+	}
+	if !dry {
+		twitchMarkerReplay(job.label, job.mapName) // Twitch marker as the replay airs
 	}
 	windowStart, windowEnd := playbackWindow(job.offsetMs, job.preMs, job.postMs)
 	playWall := wallMsForDemoMs(windowEnd-windowStart, job.speed)
@@ -1205,6 +1239,7 @@ func handleReplay(w http.ResponseWriter, r *http.Request) {
 	job := replayJob{
 		file: seg.File, path: relPath, mod: mod, absPath: absPath, offsetMs: offsetMs,
 		preMs: pre * 1000, postMs: post * 1000, speed: speed,
+		mapName: seg.Map, label: nearestHighlightLabel(seg, seg.StartSv+offsetMs),
 	}
 	if !replay.begin(job) {
 		writeJSON(w, 409, map[string]string{"error": "a replay is already running"})

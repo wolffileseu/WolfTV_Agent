@@ -25,7 +25,12 @@ import (
 
 const (
 	maxTitleLen        = 140
+	maxMarkerLen       = 140
 	tokenRefreshBuffer = 5 * time.Minute // refresh this long before the token expires
+	markerMinInterval  = 8 * time.Second // Twitch caps markers; one per few seconds is plenty
+	// highlightMarkerMinScore gates the optional standalone-highlight marker
+	// (triple kill and up) so markers don't flood.
+	highlightMarkerMinScore = 9
 )
 
 /* ----------------------------- pure helpers ------------------------------ */
@@ -101,6 +106,25 @@ func tokenNeedsRefresh(expiry, now time.Time, buffer time.Duration) bool {
 	return now.After(expiry.Add(-buffer))
 }
 
+// markerAllowed reports whether enough time has passed since the last marker.
+// Pure.
+func markerAllowed(last, now time.Time, min time.Duration) bool {
+	return last.IsZero() || now.Sub(last) >= min
+}
+
+// markerDescription builds a marker description like "Replay: Triple kill by X
+// on goldrush", capped at Twitch's ~140-char limit on a word boundary. Pure.
+func markerDescription(prefix, label, mapName string) string {
+	d := prefix
+	if label != "" {
+		d += ": " + label
+	}
+	if mapName != "" {
+		d += " on " + mapName
+	}
+	return truncateWordBoundary(normalizeTitleSpaces(d), maxMarkerLen)
+}
+
 /* ------------------------------- transport ------------------------------- */
 
 // Sentinel errors let the client distinguish "access token stale, refresh and
@@ -120,6 +144,11 @@ type twitchTransport interface {
 	userID(clientID, accessToken string) (string, error)
 	// setTitle PATCHes the channel title.
 	setTitle(clientID, accessToken, broadcasterID, title string) error
+	// isLive reports whether the channel is currently live-streaming (markers
+	// only work while live).
+	isLive(clientID, accessToken, broadcasterID string) (bool, error)
+	// marker creates a stream marker.
+	marker(clientID, accessToken, broadcasterID, description string) error
 }
 
 // httpTransport is the real Twitch client. Cannot be unit-tested here (needs the
@@ -234,6 +263,61 @@ func (h *httpTransport) setTitle(clientID, accessToken, broadcasterID, title str
 	return nil
 }
 
+func (h *httpTransport) isLive(clientID, accessToken, broadcasterID string) (bool, error) {
+	req, err := helixReq("GET",
+		"https://api.twitch.tv/helix/streams?user_id="+url.QueryEscape(broadcasterID),
+		clientID, accessToken, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := h.hc.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 401 {
+		return false, errTwitchUnauthorized
+	}
+	if resp.StatusCode != 200 {
+		return false, errStr("twitch streams: status " + resp.Status)
+	}
+	var r struct {
+		Data []struct {
+			Type string `json:"type"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return false, err
+	}
+	// a live stream has a non-empty data array with type "live".
+	return len(r.Data) > 0 && r.Data[0].Type == "live", nil
+}
+
+func (h *httpTransport) marker(clientID, accessToken, broadcasterID, description string) error {
+	body, _ := json.Marshal(map[string]string{"user_id": broadcasterID, "description": description})
+	req, err := helixReq("POST", "https://api.twitch.tv/helix/streams/markers",
+		clientID, accessToken, body)
+	if err != nil {
+		return err
+	}
+	resp, err := h.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 401 {
+		return errTwitchUnauthorized
+	}
+	if resp.StatusCode == 404 {
+		return errStr("twitch marker: not live (404)") // stream down between check and post
+	}
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return errStr("twitch marker: status " + resp.Status + " " + string(b))
+	}
+	return nil
+}
+
 /* -------------------------------- client --------------------------------- */
 
 type twitchClient struct {
@@ -252,6 +336,9 @@ type twitchClient struct {
 	// title state
 	lastTitleKey string // "map|serverip" -- cheap dedupe so we don't getstatus every tick
 	currentTitle string // last title we successfully set (for /twitch/status)
+
+	// marker state
+	lastMarkerAt time.Time
 
 	now func() time.Time // injectable clock for tests
 }
@@ -411,6 +498,58 @@ func (t *twitchClient) updateTitleFor(mapName, serverIP string) {
 	t.setTitle(renderTitle(cfg.TwitchTitleTemplate, twitchTitleVars(mapName, host, mod, serverIP, players)))
 }
 
+// marker drops a stream marker, rate-limited and only while actually live.
+// Runs under the lock (called from a goroutine). Silent on skip.
+func (t *twitchClient) marker(desc string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.disabled || !cfg.TwitchMarkersEnabled || desc == "" {
+		return
+	}
+	if !markerAllowed(t.lastMarkerAt, t.clock(), markerMinInterval) {
+		return // too soon since the last marker
+	}
+	// markers only work while live -- check first, skip silently if the stream is down.
+	live := false
+	if err := t.doHelixLocked(func(tok, bid string) error {
+		l, e := t.tr.isLive(t.clientID, tok, bid)
+		live = l
+		return e
+	}); err != nil {
+		log.Println("twitch: marker live-check failed:", err)
+		return
+	}
+	if !live {
+		return
+	}
+	if err := t.doHelixLocked(func(tok, bid string) error {
+		return t.tr.marker(t.clientID, tok, bid, desc)
+	}); err != nil {
+		log.Println("twitch: create marker failed:", err)
+		return
+	}
+	t.lastMarkerAt = t.clock()
+	log.Println("twitch: marker ->", desc)
+}
+
+// twitchMarkerReplay drops a marker when a replay airs. No-op unless Twitch and
+// markers are enabled. Called (in a goroutine) from the replay controller.
+func twitchMarkerReplay(label, mapName string) {
+	if twitch == nil {
+		return
+	}
+	go twitch.marker(markerDescription("Replay", label, mapName))
+}
+
+// twitchMarkerHighlight optionally marks a high-value highlight even without a
+// replay (gated behind twitch_marker_highlights, default off).
+func twitchMarkerHighlight(h Highlight) {
+	if twitch == nil || !cfg.TwitchMarkerHighlights || h.Score < highlightMarkerMinScore {
+		return
+	}
+	go twitch.marker(markerDescription("Highlight", highlightLabel(h), h.Map))
+}
+
 // twitchOnTelemetry is the hook called from the live pipeline on every status
 // update. It fires a title update only once the instance has settled on a map
 // and only when the map/server actually changed. No-op unless Twitch is on.
@@ -430,11 +569,16 @@ func twitchOnTelemetry(state, mapName, serverIP string) {
 func (t *twitchClient) status() map[string]any {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	var lastMarker int64
+	if !t.lastMarkerAt.IsZero() {
+		lastMarker = t.lastMarkerAt.Unix()
+	}
 	return map[string]any{
-		"enabled":       true,
-		"authorized":    !t.disabled && t.accessToken != "",
-		"broadcaster":   t.broadcasterID,
-		"current_title": t.currentTitle,
+		"enabled":        true,
+		"authorized":     !t.disabled && t.accessToken != "",
+		"broadcaster":    t.broadcasterID,
+		"current_title":  t.currentTitle,
+		"last_marker_at": lastMarker,
 	}
 }
 

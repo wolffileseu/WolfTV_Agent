@@ -60,6 +60,9 @@
   "twitch_refresh_token": "",
   "twitch_broadcaster_id": "",
   "twitch_title_template": "Wolffiles.eu 24/7 ET | {map} @ {server} | /connect {serverip}",
+  "_comment_twitch_markers": "twitch_markers_enabled drops a stream marker in the VOD when a replay airs (auto or manual). twitch_marker_highlights additionally marks high-value highlights (triple kill and up) even without a replay -- default off so markers don't flood. Markers are rate-limited and only created while actually live.",
+  "twitch_markers_enabled": true,
+  "twitch_marker_highlights": false,
 
   "_comment_director": "The automatic replay director's runtime settings (auto_replay on/off, heat weighting, lull threshold, min interval, min highlight age, per-map cap, playback window) are NOT here -- they live in director.json next to this file so they can be tuned live via POST /director/config without editing this hand-maintained file. director.json is created on first update; see the README. auto_replay defaults to false."
 }

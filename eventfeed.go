@@ -250,6 +250,9 @@ func (f *eventFeed) pushHighlightLocked(h Highlight) {
 	}
 	log.Printf("highlight: %s %s (score %d) svtime %d",
 		h.Kind, h.Player, h.Score, h.SvTime)
+	// optional Twitch marker for a high-value highlight (gated + rate-limited,
+	// dispatched async so it never blocks under feed.mu).
+	twitchMarkerHighlight(h)
 }
 
 func (f *eventFeed) addSegment(s DemoSegment) {
