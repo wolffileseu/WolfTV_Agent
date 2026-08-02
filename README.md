@@ -100,7 +100,12 @@ signals the live instance.
 2. **Load the demo** with `wtvdemo <mod>/<file>` over the replay pipeline — the
    segment's path relative to the client's demo root (`cl_wtvDemoPath`),
    bypassing the `fs_game`-relative lookup that plain `demo` does.
-3. **Seek.** Set `timescale <replay_seek_timescale>` to fast-forward, then drop
+3. **Force the resolution** (the demo's mod just loaded and clobbered it — see
+   below). Send `r_mode -1` / `r_customwidth W` / `r_customheight H` /
+   `vid_restart` for the configured preset over the replay pipeline, and wait
+   for the renderer to re-init before the OBS cut, so viewers never see the
+   flicker. Done *before* the seek (so the mod's `vid_restart` can't race it).
+4. **Seek.** Set `timescale <replay_seek_timescale>` to fast-forward, then drop
    back to slow motion shortly before the window.
    *The WTV status protocol does not report the client's server time*, so
    elapsed demo time is estimated as `wall_time × timescale`. This biases toward
@@ -108,13 +113,33 @@ signals the live instance.
    is not) — at a high timescale the client often can't render fast enough, so
    real demo time advances *slower* than the estimate. A fixed safety margin
    widens that bias.
-4. **Cut OBS to the replay scene** (only *after* the timescale change succeeds,
+5. **Cut OBS to the replay scene** (only *after* the timescale change succeeds,
    so a failed OBS switch never shows a fast-forward on the live scene).
-5. **Play** `replay_pre_sec` before to `replay_post_sec` after the highlight at
+6. **Play** `replay_pre_sec` before to `replay_post_sec` after the highlight at
    `replay_speed` (slow motion).
-6. **Cut OBS back to the live scene.**
-7. Leave the replay instance **warm** for `replay_idle_stop_sec`, then stop it
+7. **Cut OBS back to the live scene.**
+8. Leave the replay instance **warm** for `replay_idle_stop_sec`, then stop it
    (ET start is slow; a warm instance makes back-to-back replays fast).
+
+> **Why force the resolution over the pipeline?** The launch args carry the
+> right resolution and the instance starts at it — but each mod's cgame loads
+> *last*, applies its own persisted video cvars (often `r_mode 6` = 720p) and
+> does its own `vid_restart`, so the mod wins and every replay ends up 720p.
+> The agent is the only thing that can run *after* the mod, so it re-forces the
+> resolution over the pipeline (step 3). Fixing it in the profile config is a
+> dead end: each mod has its own `<mod>/profiles/<replay_profile>/etconfig.cfg`,
+> the broadcast rotates across many mods, and a brand-new mod profile starts
+> wrong again. If the resolution-force or its `vid_restart` fails/times out, the
+> replay carries on anyway (a 720p replay beats one stranded on the replay
+> scene). **The auto-director does the same force during preparation**, before
+> the lull cut. The re-init *timing* (how long to wait) needs a live check on
+> the Windows box.
+>
+> If the replay instance logs `couldn't load
+> profiles/<replay_profile>/etconfig.cfg` (a manually-edited config saved in a
+> non-ASCII encoding, e.g. PowerShell `Set-Content`'s default), just **delete
+> that profile directory** — ET recreates it, and with the pipeline force above
+> its contents no longer matter for resolution.
 
 Only **one replay at a time** — a second `POST /replay` returns `409`.
 

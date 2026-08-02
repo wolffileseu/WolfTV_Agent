@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOffsetFromSvtime(t *testing.T) {
@@ -526,6 +527,123 @@ func TestReplayRunDryRun(t *testing.T) {
 	}
 	if replay.lastDone.IsZero() {
 		t.Fatal("lastDone not set -- idle-stop timer would never fire")
+	}
+}
+
+func TestReplayResolutionDims(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cases := []struct {
+		preset string
+		w, h   int
+	}{
+		{"720p", 1280, 720},
+		{"1080p", 1920, 1080},
+		{"1440p", 2560, 1440},
+		{"2160p", 3840, 2160},
+		{"", 1920, 1080},      // unset -> default 1080p
+		{"bogus", 1920, 1080}, // unknown -> default 1080p
+		{"1080P", 1920, 1080}, // case-insensitive
+	}
+	for _, c := range cases {
+		cfg.Resolution = c.preset
+		if w, h := replayResolutionDims(); w != c.w || h != c.h {
+			t.Errorf("preset %q -> %dx%d, want %dx%d", c.preset, w, h, c.w, c.h)
+		}
+	}
+}
+
+func idxOf(trace []string, s string) int {
+	for i, x := range trace {
+		if x == s {
+			return i
+		}
+	}
+	return -1
+}
+
+// The core of this task: the resolution force must be emitted AFTER the demo
+// loads (so it beats the mod's own vid_restart) and BEFORE the OBS cut (so the
+// re-init flicker never reaches the broadcast).
+func TestReplayResolutionForcedAfterLoadBeforeCut(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.DryRun = true
+	cfg.ReplaySeekTimescale = 8
+	cfg.ReplaySpeed = 0.4
+	cfg.SceneLive = "Live"
+	cfg.SceneReplay = "Replay"
+	cfg.ReplaySeekMode = "timescale"
+	cfg.Resolution = "1080p"
+
+	var trace []string
+	replayTrace = func(s string) { trace = append(trace, s) }
+	defer func() { replayTrace = nil }()
+
+	replay = replayController{}
+	job := replayJob{file: "wtv_supply_1.dm_84", path: "silent/wtv_supply_1.dm_84", mod: "silent",
+		absPath: "C:\\x", offsetMs: 45000, preMs: 8000, postMs: 5000, speed: 0.4}
+	if !replay.begin(job) {
+		t.Fatal("begin failed")
+	}
+	replay.run(job) // dry-run: synchronous
+
+	load := idxOf(trace, "wtvdemo silent/wtv_supply_1.dm_84")
+	rmode := idxOf(trace, "r_mode -1")
+	width := idxOf(trace, "r_customwidth 1920")
+	height := idxOf(trace, "r_customheight 1080")
+	vid := idxOf(trace, "vid_restart")
+	cut := idxOf(trace, "scene:replay")
+
+	if load < 0 || rmode < 0 || width < 0 || height < 0 || vid < 0 || cut < 0 {
+		t.Fatalf("missing steps in trace: %v", trace)
+	}
+	if !(load < rmode) {
+		t.Errorf("resolution force must come AFTER the demo load: %v", trace)
+	}
+	if !(rmode < width && width < height && height < vid) {
+		t.Errorf("resolution commands out of order: %v", trace)
+	}
+	if !(vid < cut) {
+		t.Errorf("the resolution vid_restart must come BEFORE the OBS cut: %v", trace)
+	}
+}
+
+// The auto path forces resolution during PREPARE (after load, before the hold);
+// no scene cut happens there -- that waits for the lull trigger.
+func TestReplayResolutionForcedInPrepare(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.DryRun = true
+	cfg.SceneLive = "Live"
+	cfg.SceneReplay = "Replay"
+	cfg.ReplaySeekMode = "timescale"
+	cfg.Resolution = "1440p"
+
+	var trace []string
+	replayTrace = func(s string) { trace = append(trace, s) }
+	defer func() { replayTrace = nil }()
+
+	replay = replayController{}
+	job := replayJob{file: "p.dm_84", path: "silent/p.dm_84", mod: "silent", absPath: "C:\\p",
+		offsetMs: 20000, preMs: 8000, postMs: 5000, speed: 0.4}
+	if !replay.prepareAuto(job) {
+		t.Fatal("prepareAuto failed")
+	}
+	waitFor(t, 3*time.Second, func() bool { return replay.isPrepared() })
+
+	load := idxOf(trace, "wtvdemo silent/p.dm_84")
+	rmode := idxOf(trace, "r_mode -1")
+	dims := idxOf(trace, "r_customwidth 2560") // 1440p
+	vid := idxOf(trace, "vid_restart")
+	if load < 0 || rmode < 0 || dims < 0 || vid < 0 {
+		t.Fatalf("prepare should force resolution after load: %v", trace)
+	}
+	if !(load < rmode && rmode < vid) {
+		t.Errorf("resolution force must follow the demo load in prepare: %v", trace)
+	}
+	if idxOf(trace, "scene:replay") >= 0 {
+		t.Errorf("prepare must NOT cut to the replay scene (that's the trigger's job): %v", trace)
 	}
 }
 

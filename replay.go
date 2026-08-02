@@ -43,6 +43,9 @@ const (
 	replayActiveTimeout = 25 * time.Second
 	// replayStartupEtaSec is the rough cost of a cold instance start, for eta.
 	replayStartupEtaSec = 15
+	// replayReinitTimeout bounds the wait for the renderer to come back after the
+	// post-mod-load resolution vid_restart, before cutting OBS to the replay.
+	replayReinitTimeout = 12 * time.Second
 )
 
 // replayPort is the replay instance's cl_wtvPort, derived from replay_pipe_addr.
@@ -695,9 +698,16 @@ func (rc *replayController) status() map[string]any {
 	}
 }
 
+// replayTrace, when set (tests only), records the ordered stream of replay
+// pipeline commands and OBS scene cuts so the sequence can be asserted.
+var replayTrace func(string)
+
 // replayExec sends a console command to the replay instance (logged; a no-op
 // send in dry-run). Never touches the live instance.
 func (rc *replayController) replayExec(line string, dry bool) bool {
+	if replayTrace != nil {
+		replayTrace(line)
+	}
 	log.Printf("replay: exec %q", line)
 	if dry {
 		return true
@@ -717,6 +727,9 @@ func (rc *replayController) cutScene(logical string, dry bool) error {
 	name := resolveScene(logical)
 	if name == "" {
 		return errStr("scene not configured: " + logical)
+	}
+	if replayTrace != nil {
+		replayTrace("scene:" + logical)
 	}
 	log.Printf("replay: OBS scene -> %s (%s)", logical, name)
 	if dry {
@@ -742,6 +755,77 @@ func (rc *replayController) sleepAbortable(d time.Duration, cancel <-chan struct
 		log.Println("replay: aborted during wait")
 		return false
 	}
+}
+
+// replayResolutionDims returns width/height for the configured resolution preset
+// (default 1080p). Mirrors resolutionArgs' preset handling.
+func replayResolutionDims() (int, int) {
+	if dims, ok := resolutionPresets[strings.ToLower(strings.TrimSpace(cfg.Resolution))]; ok {
+		return dims[0], dims[1]
+	}
+	dims := resolutionPresets[defaultResolution]
+	return dims[0], dims[1]
+}
+
+// forceReplayResolution re-applies the configured resolution AFTER the demo's
+// mod has loaded. The launch args and the post-hello vid_restart set the right
+// resolution, but the mod's cgame loads LAST and applies its own saved r_mode
+// (often mode 6 = 720p) with its own vid_restart, so the mod wins. The agent is
+// the only thing that can run after the mod, so it forces r_mode/-width/-height
+// + vid_restart over the pipeline here, then waits for the renderer to re-init
+// (BEFORE the OBS cut, so viewers never see the flicker).
+//
+// Returns false ONLY if the replay was aborted during the wait. A failed or
+// timed-out vid_restart returns true and the caller carries on: a 720p replay
+// is bad, but stranding OBS on the replay scene is worse (same invariant as the
+// rest of the path).
+func (rc *replayController) forceReplayResolution(cancel <-chan struct{}, dry bool) bool {
+	w, h := replayResolutionDims()
+	rc.setPhase("resolution")
+	rc.replayExec("r_mode -1", dry)
+	rc.replayExec(fmt.Sprintf("r_customwidth %d", w), dry)
+	rc.replayExec(fmt.Sprintf("r_customheight %d", h), dry)
+	rc.replayExec("vid_restart", dry)
+	if dry {
+		return true
+	}
+	settled, aborted := waitReplayReinit(replayReinitTimeout, cancel)
+	if aborted {
+		return false
+	}
+	if !settled {
+		log.Println("replay: resolution vid_restart did not settle in time -- continuing anyway (may be 720p)")
+	}
+	return true
+}
+
+// waitReplayReinit waits for a fresh telemetry frame after the resolution
+// vid_restart -- the client drops and re-inits the renderer, pausing telemetry,
+// so a new frame means it is back. settled=true once one arrives; aborted=true
+// if the replay was cancelled; both false on timeout.
+func waitReplayReinit(timeout time.Duration, cancel <-chan struct{}) (settled, aborted bool) {
+	var before time.Time
+	if rp != nil {
+		rp.mu.Lock()
+		before = rp.lastEvent
+		rp.mu.Unlock()
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-cancel:
+			return false, true
+		default:
+		}
+		time.Sleep(300 * time.Millisecond)
+		rp.mu.Lock()
+		ev := rp.lastEvent
+		rp.mu.Unlock()
+		if ev.After(before) {
+			return true, false
+		}
+	}
+	return false, false
 }
 
 // run executes the full replay sequence. It ALWAYS ends via finish(), which
@@ -777,14 +861,21 @@ func (rc *replayController) run(job replayJob) {
 		}
 	}
 
-	// 2) seek: fast-forward to just before the window.
+	// 2) the mod just loaded and clobbered the resolution -> force it back (and
+	// wait for the renderer to re-init) BEFORE the seek and the OBS cut, so the
+	// broadcast never shows 720p or the re-init flicker. Only aborts on cancel.
+	if !rc.forceReplayResolution(cancel, dry) {
+		return
+	}
+
+	// 3) seek: fast-forward to just before the window.
 	rc.setPhase("seeking")
 	windowStart, windowEnd := playbackWindow(job.offsetMs, job.preMs, job.postMs)
 	if !rc.seekTo(fastForwardUntilMs(windowStart, seekMarginMs), cancel, dry) {
 		return
 	}
 
-	// 3) drop into slow-mo, THEN cut to the replay scene. Cutting only after a
+	// 4) drop into slow-mo, THEN cut to the replay scene. Cutting only after a
 	// successful timescale change means a failed OBS switch never leaves the
 	// live scene showing a fast-forward.
 	rc.setPhase("playing")
@@ -797,7 +888,7 @@ func (rc *replayController) run(job replayJob) {
 		twitchMarkerReplay(job.label, job.mapName) // Twitch marker as the replay airs
 	}
 
-	// 4) play the window at slow speed, then finish() cuts back to live.
+	// 5) play the window at slow speed, then finish() cuts back to live.
 	windowMs := windowEnd - windowStart
 	playWall := wallMsForDemoMs(windowMs, job.speed)
 	rc.sleepAbortable(time.Duration(playWall)*time.Millisecond, cancel, dry)
@@ -899,6 +990,12 @@ func (rc *replayController) runPrepare(job replayJob) {
 		}
 		if !dry && !waitReplayActive(replayActiveTimeout, cancel) {
 			log.Println("replay: prepare -- demo did not reach playback (timeout/abort)")
+			return false
+		}
+		// the mod loaded and clobbered the resolution -> force it back before
+		// seeking/holding, so a prepared clip is already at the right resolution
+		// when the lull cut comes. Only aborts on cancel.
+		if !rc.forceReplayResolution(cancel, dry) {
 			return false
 		}
 		rc.setPhase("seeking")
@@ -1066,6 +1163,13 @@ func ensureReplayUp(mod string, timeout time.Duration, cancel <-chan struct{}) e
 // Doing it here makes the replay window independent of what the profile
 // contains. It never touches the live instance. The socket is engine-level and
 // survives the renderer restart; a short settle wait lets the window come back.
+//
+// NOTE: this pre-demo vid_restart is now REDUNDANT for the broadcast -- the
+// demo's mod loads afterwards and clobbers the resolution anyway, so the
+// authoritative fix is forceReplayResolution (run AFTER the mod loads). It is
+// kept because it is harmless (the pre-mod window is never on the broadcast)
+// and removing it risks an untestable change to the pre-mod startup resolution;
+// it can be dropped once a live run confirms the launch args alone suffice.
 func ensureReplayVidRestart(cancel <-chan struct{}) {
 	if rp == nil {
 		return
