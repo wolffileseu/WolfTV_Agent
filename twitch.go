@@ -538,7 +538,7 @@ func twitchMarkerReplay(label, mapName string) {
 	if twitch == nil {
 		return
 	}
-	go twitch.marker(markerDescription("Replay", label, mapName))
+	goGuarded("twitch-marker-replay", func() { twitch.marker(markerDescription("Replay", label, mapName)) })
 }
 
 // twitchMarkerHighlight optionally marks a high-value highlight even without a
@@ -547,7 +547,7 @@ func twitchMarkerHighlight(h Highlight) {
 	if twitch == nil || !cfg.TwitchMarkerHighlights || h.Score < highlightMarkerMinScore {
 		return
 	}
-	go twitch.marker(markerDescription("Highlight", highlightLabel(h), h.Map))
+	goGuarded("twitch-marker-highlight", func() { twitch.marker(markerDescription("Highlight", highlightLabel(h), h.Map)) })
 }
 
 // twitchOnTelemetry is the hook called from the live pipeline on every status
@@ -561,7 +561,7 @@ func twitchOnTelemetry(state, mapName, serverIP string) {
 	if !twitch.titleKeyChanged(key) {
 		return
 	}
-	go twitch.updateTitleFor(mapName, serverIP)
+	goGuarded("twitch-update-title", func() { twitch.updateTitleFor(mapName, serverIP) })
 }
 
 /* -------------------------------- status --------------------------------- */
@@ -612,5 +612,5 @@ func setupTwitch() {
 		broadcasterID: cfg.TwitchBroadcasterID, // "" -> resolved on first use
 	}
 	log.Println("twitch: enabled")
-	go twitch.init()
+	goGuarded("twitch-init", twitch.init)
 }

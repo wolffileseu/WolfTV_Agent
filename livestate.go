@@ -62,9 +62,9 @@ func persistLiveStateLocked() {
 		CurrentServer: st.currentServer,
 		OverlayURL:    st.overlayURL,
 	}
-	go func() {
+	goGuarded("livestate-save", func() {
 		if err := saveLiveState(ls); err != nil {
 			log.Println("livestate: save failed:", err)
 		}
-	}()
+	})
 }

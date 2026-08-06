@@ -963,7 +963,7 @@ func (rc *replayController) prepareAuto(job replayJob) bool {
 	rc.mu.Lock()
 	rc.auto = true // director-driven -> discardPrepared may tear it down
 	rc.mu.Unlock()
-	go rc.runPrepare(job)
+	goGuarded("replay-prepare", func() { rc.runPrepare(job) })
 	return true
 }
 
@@ -1032,7 +1032,7 @@ func (rc *replayController) triggerPrepared() bool {
 	job := rc.preparedJob
 	cancel := rc.cancel
 	rc.mu.Unlock()
-	go rc.runTrigger(job, cancel)
+	goGuarded("replay-trigger", func() { rc.runTrigger(job, cancel) })
 	return true
 }
 
@@ -1362,7 +1362,7 @@ func handleReplay(w http.ResponseWriter, r *http.Request) {
 	eta := etaSeconds(instUp && action == instReuse, ffTarget, cfg.ReplaySeekTimescale,
 		windowEnd-windowStart, speed)
 
-	go replay.run(job)
+	goGuarded("replay-run", func() { replay.run(job) })
 
 	log.Printf("replay: accepted %s (mod %s via %s, instance: %s) offset %dms (pre %ds post %ds speed %.2f) eta %ds",
 		relPath, mod, modSource, action, offsetMs, pre, post, speed, eta)
@@ -1419,8 +1419,8 @@ func setupReplay() {
 		directs:    false, // the replay orchestrator drives the camera, not the director
 		feedEvents: false, // replayed demos must NOT pollute the live event feed
 	}
-	go rp.pipeLoop()
-	go replayIdleMonitor()
+	goGuarded("pipeline-replay", rp.pipeLoop)
+	goGuarded("replay-idle-monitor", replayIdleMonitor)
 	log.Printf("replay: enabled -- instance pipe %s, shared homepath %s, profile %s, demo dir %s, dry_run %v",
 		cfg.ReplayPipeAddr, cfg.LiveHomepath, cfg.ReplayProfile, cfg.ReplayDemoDir, cfg.DryRun)
 	if risks := sharedHomepathRisks(cfg.EtArgs); len(risks) > 0 {

@@ -50,7 +50,7 @@ func startSysMonitor(diskPath string) {
 		diskPath = defaultDiskPath()
 	}
 	sysmon = &sysMonitor{diskPath: diskPath, started: time.Now()}
-	go sysmon.loop()
+	goGuarded("sys-monitor", sysmon.loop)
 }
 
 func (s *sysMonitor) loop() {

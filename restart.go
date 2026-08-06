@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"log"
 	"net"
 	"net/http"
@@ -61,10 +63,10 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 	log.Println("restart: replacement spawned; live ET left running for it to adopt -- exiting")
 	writeJSON(w, 200, map[string]any{"ok": true})
 	// exit after the response has a moment to flush.
-	go func() {
+	goGuarded("restart-exit", func() {
 		time.Sleep(400 * time.Millisecond)
 		os.Exit(0)
-	}()
+	})
 }
 
 // pipeReachable reports whether something accepts a connection on addr, i.e.
@@ -114,6 +116,73 @@ func adoptLiveET() {
 	}
 	st.mu.Unlock()
 	log.Printf("adopt: live ET already running on %s -- re-attaching, broadcast preserved", cfg.PipeAddr)
+}
+
+// pipeHealthy is a stronger liveness test than pipeReachable: it dials, sends
+// hello, and waits briefly for ANY line back from the ET client. A hung ET can
+// still accept a TCP connection (winsock still open) while its main loop is
+// dead, and pipeReachable would happily "adopt" it -- leaving the agent
+// watching a corpse forever. Any read within the timeout means the pipeline is
+// actually alive.
+func pipeHealthy(addr string, timeout time.Duration) bool {
+	if addr == "" {
+		return false
+	}
+	c, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	b, _ := json.Marshal(pipeMsg{Cmd: "hello", Proto: 1})
+	_ = c.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Write(append(b, '\n')); err != nil {
+		return false
+	}
+	_ = c.SetReadDeadline(time.Now().Add(timeout))
+	sc := bufio.NewScanner(c)
+	sc.Buffer(make([]byte, 64*1024), 64*1024)
+	return sc.Scan()
+}
+
+// adoptOrRestartLiveET is the crash-restart-friendly variant of adoptLiveET: if
+// something is answering the pipe AND is genuinely alive, adopt it (existing
+// behaviour); if TCP dial succeeds but the pipeline is dead (hung ET), kill the
+// ET so the watchdog can bring it back cleanly. This removes the "RDP in and
+// close all ET processes" manual dance after a hard crash.
+func adoptOrRestartLiveET() {
+	if !pipeReachable(cfg.PipeAddr) {
+		return // no ET running -> normal cold start, wait for /start
+	}
+	if pipeHealthy(cfg.PipeAddr, 5*time.Second) {
+		adoptLiveET()
+		return
+	}
+	log.Printf("adopt: live pipe %s accepts connections but is unresponsive -- "+
+		"killing the hung ET so the watchdog can restart it cleanly", cfg.PipeAddr)
+	// The hung ET does not answer its pipeline, so we cannot send `quit`; a
+	// name-based taskkill is the only remaining lever. This runs BEFORE the
+	// replay instance's pipeLoop starts, so the shared-name concern that keeps
+	// kill() PID-only during normal operation does not apply here.
+	if err := killProcessByName(cfg.EtExeName); err != nil {
+		log.Println("adopt: kill hung ET failed:", err)
+	}
+	// give Windows a moment to release winsock/window/handles.
+	time.Sleep(2 * time.Second)
+	// Even though there is now no ET, recover the pool so the watchdog can
+	// relaunch (fresh start) without the operator having to hit /start.
+	if ls, err := loadLiveState(); err == nil && len(ls.Servers) > 0 {
+		st.mu.Lock()
+		st.desired = true
+		st.servers = ls.Servers
+		st.password = ls.Password
+		st.overlayURL = ls.OverlayURL
+		st.currentServer = ls.CurrentServer
+		st.mu.Unlock()
+		log.Printf("adopt: recovered live-state (%d servers) -- watchdog will relaunch",
+			len(ls.Servers))
+	} else {
+		log.Println("adopt: no live-state to auto-relaunch; waiting for a panel /start")
+	}
 }
 
 // serveWithRetry binds the listen address, retrying briefly if it is still held

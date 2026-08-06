@@ -420,6 +420,44 @@ silent-broadcast-death bug and has been removed.)
 > The adoption path (re-attaching to a live ET, seamless broadcast) needs a live
 > check on the streaming box; it can't be exercised without a real ET + OBS.
 
+### Crash reporting & auto-restart
+
+Every long-lived goroutine (pipeline, director, watchdog, replay orchestrator,
+audio/system/GPU monitors, Twitch, HTTP handlers via the `net/http` server) is
+wrapped in `guard()`, which recovers panics, writes a **detailed** crash report
+to disk and re-execs the agent. The replacement adopts the live ET through the
+existing `/restart` path, so the broadcast survives.
+
+**On disk:** a per-crash `crash-<timestamp>.log` and a rolling `crashes.log`,
+both next to the agent binary. Each report contains the panic value, the full
+stack trace, and a **runtime context snapshot** — current server / map / mod,
+replay phase, both pipeline states, director state, last ~20 event-feed
+entries, OBS scene, goroutine count, memory. The context is the missing piece
+after the earlier silent post-replay deaths; the stack alone couldn't tell you
+whether ET was still alive or what the director was doing.
+
+**Crash-loop breaker.** More than 5 crashes inside 2 minutes stops the
+auto-restart and logs loudly. A tight loop must not hammer ET/OBS forever;
+after the breaker trips the operator (or Task Scheduler's own restart
+policy — see below) takes over.
+
+**On `/status`:** the last crash is exposed as
+`last_crash: {time, subsystem, summary, report_file, restart_count}` so the
+panel can show "agent restarted itself at HH:MM because X".
+
+**What recover() cannot catch.** `os.Exit`, fatal runtime errors
+(`fatal error: concurrent map writes`, out-of-memory, deadlock detection) and
+the Go runtime itself dying. For those the backstop is **launching with stderr
+captured** — see the autostart section below. The agent MUST be started as:
+
+```
+wolftv-agent.exe 2> crash.txt
+```
+
+so the runtime's fatal message lands in a file even when nothing in Go can run
+any more. The Task Scheduler "restart on failure" then brings the process back
+and `adoptLiveET` re-attaches to the live ET.
+
 ### Security
 
 The agent's control port lets a caller drive your stream and run client

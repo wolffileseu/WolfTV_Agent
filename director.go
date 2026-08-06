@@ -28,7 +28,7 @@ func (in *instance) spawn(args []string) error {
 	in.startedAt = time.Now()
 	done := make(chan struct{})
 	in.etDone = done
-	go func() {
+	goGuarded("et-wait-"+in.name, func() {
 		_ = cmd.Wait()
 		close(done)
 		in.mu.Lock()
@@ -37,7 +37,7 @@ func (in *instance) spawn(args []string) error {
 			log.Printf("et[%s]: process exited", in.name)
 		}
 		in.mu.Unlock()
-	}()
+	})
 	return nil
 }
 
@@ -116,7 +116,8 @@ func deploy(servers []string, password, overlayURL string) (string, error) {
 			st.discSince = time.Time{}
 			resetDirectorLocked()
 			persistLiveStateLocked() // an adopting agent must be able to relaunch this
-			go setOverlayURL(st.overlayURL)
+			overlay := st.overlayURL // capture under lock, then hand to goroutine
+			goGuarded("overlay-set", func() { setOverlayURL(overlay) })
 			return target, nil
 		}
 	}
@@ -128,7 +129,8 @@ func deploy(servers []string, password, overlayURL string) (string, error) {
 		return "", err
 	}
 	persistLiveStateLocked()
-	go setOverlayURL(st.overlayURL)
+	overlay := st.overlayURL // caller holds st.mu; capture before spawning
+	goGuarded("overlay-set", func() { setOverlayURL(overlay) })
 	return target, nil
 }
 

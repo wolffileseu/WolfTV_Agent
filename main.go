@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -295,6 +296,15 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	obsUp, streaming := obsStreamStatus()
 	resp["obs_up"] = obsUp
 	resp["streaming"] = streaming
+	if lc := getLastCrash(); lc != nil {
+		resp["last_crash"] = map[string]any{
+			"time":          lc.Time.Format(time.RFC3339),
+			"subsystem":     lc.Subsystem,
+			"summary":       lc.Summary,
+			"report_file":   lc.ReportFile,
+			"restart_count": lc.RestartCount,
+		}
+	}
 	writeJSON(w, 200, resp)
 }
 
@@ -432,6 +442,15 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	// Backstop for a panic on the main goroutine itself (config parse, HTTP
+	// serve). recover() cannot catch fatal runtime errors ("concurrent map
+	// writes", OOM) or os.Exit -- for those the stderr redirect from the
+	// autostart config is the last line of defence (see README).
+	defer func() {
+		if r := recover(); r != nil {
+			handleCrash("main", r, debug.Stack())
+		}
+	}()
 	loadConfig()
 	loadDirectorConfig()
 	if cfg.LogFile != "" {
@@ -442,17 +461,18 @@ func main() {
 		}
 	}
 	st.pipeAddr = cfg.PipeAddr // the live instance uses the existing pipe_addr
-	adoptLiveET()              // re-attach to a live ET already running (e.g. across /restart)
-	go st.pipeLoop()
-	go directorLoop()
-	go watchdog()
-	go audioMonitor()
-	go winAudioMonitor()
+	adoptOrRestartLiveET()     // re-attach to a healthy live ET, or kill a hung one
+	goGuarded("pipeline-live", st.pipeLoop)
+	goGuarded("director", directorLoop)
+	goGuarded("watchdog", watchdog)
+	goGuarded("audio-monitor", audioMonitor)
+	goGuarded("win-audio-monitor", winAudioMonitor)
+	goGuarded("crash-loop-monitor", crashLoopMonitor)
 	startSysMonitor(cfg.DiskPath)
-	startGPUMonitor()     // nvidia-smi sampler; silently inert without an NVIDIA card
-	setupReplay()         // second (replay) instance + goroutines; no-op unless enabled
-	go autoDirectorLoop() // auto-replay director; inert unless auto_replay enabled
-	setupTwitch()         // title + markers; no-op unless twitch_enabled
+	startGPUMonitor()                              // nvidia-smi sampler; silently inert without an NVIDIA card
+	setupReplay()                                  // second (replay) instance + goroutines; no-op unless enabled
+	goGuarded("auto-director", autoDirectorLoop)   // auto-replay director; inert unless auto_replay enabled
+	setupTwitch()                                  // title + markers; no-op unless twitch_enabled
 	http.HandleFunc("/start", handleStart)
 	http.HandleFunc("/switch", handleSwitch)
 	http.HandleFunc("/exec", handleExec)
