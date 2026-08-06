@@ -24,6 +24,17 @@
   "audio_silence_sec": 30,
   "audio_autofix": true,
 
+  "_comment_rotate_pk3": "Per-rotation pk3 cleanup so the shared homepath does not fill with auto-downloaded maps. rotate_pk3_clear enables it; rotate_pk3_homepath defaults to live_homepath. Each rule targets one folder under the homepath with a mode: 'whitelist' keeps only the listed files (delete rest); 'blacklist' deletes only the listed ones. etmain is hardcoded off-limits regardless of config. Sequence per rotation: ET (and any warm replay instance) is shut down -> per-folder rules run -> ET restarts on the new server. Because this forces the kill+start path, expect the seamless pipeline 'connect' switch to be replaced by a ~10-15s black between servers.",
+  "rotate_pk3_clear": false,
+  "rotate_pk3_homepath": "",
+  "rotate_pk3_rules": [
+    { "folder": "dlcache", "mode": "blacklist", "list": [] },
+    { "folder": "nq",      "mode": "whitelist", "list": ["nq_v1.2.9_3.pk3", "nq_b_v1.2.9_6.pk3"] },
+    { "folder": "jaymod",  "mode": "whitelist", "list": ["jaymod-2.2.0.pk3"] },
+    { "folder": "silent",  "mode": "whitelist", "list": ["silent-0.9.0.pk3", "zzz_merged_v1.pk3"] },
+    { "folder": "nitmod",  "mode": "whitelist", "list": ["nitmod_2.3.5.pk3", "x_nitmod_skin.2.7.pk3"] }
+  ],
+
   "disk_path": "",
 
   "dir_min_sec": 120,

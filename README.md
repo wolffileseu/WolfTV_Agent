@@ -420,6 +420,61 @@ silent-broadcast-death bug and has been removed.)
 > The adoption path (re-attaching to a live ET, seamless broadcast) needs a live
 > check on the streaming box; it can't be exercised without a real ET + OBS.
 
+### PK3 cleanup on rotation
+
+The shared homepath fills over time with auto-downloaded pk3s. When
+`rotate_pk3_clear` is on, every server rotation (`/switch`, and the watchdog's
+own re-deploys) becomes a chance to sweep, per-folder, using either a
+whitelist or a blacklist:
+
+```json
+"rotate_pk3_clear": true,
+"rotate_pk3_homepath": "C:\\Users\\wahke\\Documents\\ETLegacy",
+"rotate_pk3_rules": [
+  { "folder": "dlcache", "mode": "blacklist", "list": [] },
+  { "folder": "nq",      "mode": "whitelist", "list": ["nq_v1.2.9_3.pk3", "nq_b_v1.2.9_6.pk3"] },
+  { "folder": "jaymod",  "mode": "whitelist", "list": ["jaymod-2.2.0.pk3"] },
+  { "folder": "silent",  "mode": "whitelist", "list": ["silent-0.9.0.pk3", "zzz_merged_v1.pk3"] },
+  { "folder": "nitmod",  "mode": "whitelist", "list": ["nitmod_2.3.5.pk3", "x_nitmod_skin.2.7.pk3"] }
+]
+```
+
+- **whitelist** — keep the listed files, delete every other `*.pk3` in the
+  folder. Used for mod folders: the mod's own paks are protected, downloaded
+  junk is removed.
+- **blacklist** — delete only the listed files, keep the rest. Used for
+  `dlcache`: keep downloaded maps, remove only specifically-named ones.
+- **whitelist with an empty list** — clears the entire folder of pk3s. Valid
+  and powerful; the log emits a loud warning so it is never a silent surprise.
+
+**Sequencing** (fixed):
+
+1. rotation triggers (`/switch`, watchdog redeploy)
+2. **ET is shut down** — both the live and the warm replay instance, since they
+   share the homepath and files would be locked
+3. per-folder rules run
+4. ET is started on the new server (it re-downloads what it needs)
+
+Because ET is fully stopped for step 3, `rotate_pk3_clear` **forces the
+kill+start path** even when pipeline `connect` would otherwise be seamless. If
+you don't want the ~10-15s black between servers, leave this off.
+
+**Hard safety rules** (non-negotiable, tested):
+
+- `etmain` is **never** touched, regardless of config. `parsePK3Rules` refuses
+  any rule targeting etmain at load time, and `applyRule` has a second guard so
+  a future refactor cannot bypass it. Deleting `pak0.pk3` / `mp_bin.pk3` bricks
+  ET; that must be impossible via this feature.
+- Only `*.pk3` files (case-insensitive) directly inside the configured folder.
+  Sub-directories and other extensions are ignored.
+- Paths are resolved and re-symlink-checked; any escape from `rotate_pk3_homepath`
+  is refused, with the file left alone.
+- Every deletion is logged with the folder, filename and total size freed.
+  Missing folders and empty rule sets are no-ops (not errors).
+
+All three fields are hot-reloadable via `/reload`; the new values take effect
+on the next rotation.
+
 ### Crash reporting & auto-restart
 
 Every long-lived goroutine (pipeline, director, watchdog, replay orchestrator,

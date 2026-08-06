@@ -125,6 +125,32 @@ type Config struct {
 	WinExpectDefault string `json:"win_expect_default"`
 	// send snd_restart automatically when silence is detected (cooldown 5min)
 	AudioAutoFix bool `json:"audio_autofix"`
+
+	// --- rotation-time PK3 cleanup ---
+	// On every server rotation (/switch, or the watchdog re-deploy), sweep the
+	// shared homepath's mod dirs and dlcache to keep them from filling with
+	// auto-downloaded pk3s. Off unless RotatePK3Clear is true.
+	//
+	// Sequencing is fixed: rotation triggers -> ET (and any warm replay
+	// instance) is shut down so no file is locked -> per-folder rules apply
+	// -> ET starts on the new server and re-downloads what it needs.
+	//
+	// Safety: etmain is NEVER touched, regardless of what appears in Rules.
+	// Only *.pk3 directly inside the configured folder is considered; any path
+	// containing ".." or a symlink escape out of RotatePK3Homepath is refused.
+	RotatePK3Clear    bool          `json:"rotate_pk3_clear"`
+	RotatePK3Homepath string        `json:"rotate_pk3_homepath"` // shared homepath; "" -> live_homepath
+	RotatePK3Rules    []PK3RuleJSON `json:"rotate_pk3_rules"`
+}
+
+// PK3RuleJSON is one folder's cleanup policy as read from config.json.
+// Mode: "whitelist" (keep listed, delete rest) or "blacklist" (delete listed,
+// keep rest). List: the file basenames the rule refers to. An empty whitelist
+// list means "clear the entire folder" (valid, powerful, and warned about).
+type PK3RuleJSON struct {
+	Folder string   `json:"folder"`
+	Mode   string   `json:"mode"`
+	List   []string `json:"list"`
 }
 
 var cfg Config
@@ -188,6 +214,10 @@ const defaultConfig = `{
   "audio_silence_sec": 30,
   "audio_autofix": true,
   "win_expect_default": "CABLE Input",
+
+  "rotate_pk3_clear": false,
+  "rotate_pk3_homepath": "",
+  "rotate_pk3_rules": [],
 
   "disk_path": "",
   "log_file": "wolffiles-agent.log"

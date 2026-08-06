@@ -97,7 +97,27 @@ func configChanges(old, next Config) (changed, needsRestart []string) {
 	hot("twitch_title_template", old.TwitchTitleTemplate != next.TwitchTitleTemplate)
 	hot("twitch_markers_enabled", old.TwitchMarkersEnabled != next.TwitchMarkersEnabled)
 	hot("twitch_marker_highlights", old.TwitchMarkerHighlights != next.TwitchMarkerHighlights)
+	// rotation-time PK3 cleanup: all live-editable (read next time deploy runs).
+	hot("rotate_pk3_clear", old.RotatePK3Clear != next.RotatePK3Clear)
+	hot("rotate_pk3_homepath", old.RotatePK3Homepath != next.RotatePK3Homepath)
+	hot("rotate_pk3_rules", !equalPK3Rules(old.RotatePK3Rules, next.RotatePK3Rules))
 	return changed, needsRestart
+}
+
+// equalPK3Rules compares two rule slices element-wise (folder+mode+list).
+func equalPK3Rules(a, b []PK3RuleJSON) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Folder != b[i].Folder || a[i].Mode != b[i].Mode {
+			return false
+		}
+		if !equalStrs(a[i].List, b[i].List) {
+			return false
+		}
+	}
+	return true
 }
 
 // applyLiveConfig copies the hot-reloadable fields from n into the running cfg.
@@ -141,6 +161,9 @@ func applyLiveConfig(n *Config) {
 	cfg.TwitchTitleTemplate = n.TwitchTitleTemplate
 	cfg.TwitchMarkersEnabled = n.TwitchMarkersEnabled
 	cfg.TwitchMarkerHighlights = n.TwitchMarkerHighlights
+	cfg.RotatePK3Clear = n.RotatePK3Clear
+	cfg.RotatePK3Homepath = n.RotatePK3Homepath
+	cfg.RotatePK3Rules = n.RotatePK3Rules
 
 	// side-effect: the disk monitor captured its path at startup, so nudge it.
 	if sysmon != nil {

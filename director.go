@@ -92,7 +92,13 @@ func (in *instance) kill() {
 
 /* deploy: switch to the best server from the list.
  * Uses the pipeline (connect command, no restart) when available,
- * falls back to kill+start. Caller must hold st.mu. */
+ * falls back to kill+start. Caller must hold st.mu.
+ *
+ * PK3 cleanup opt-in (rotate_pk3_clear) forces the kill+start path even when
+ * pipeline connect would otherwise work: the cleanup requires no file in the
+ * shared homepath to be open, so ET (and any warm replay instance) must be
+ * fully shut down before it runs. Sequence: kill both instances -> sweep ->
+ * launch on the new server (ET re-downloads what it needs). */
 func deploy(servers []string, password, overlayURL string) (string, error) {
 	target := pickServer(servers)
 	if target == "" {
@@ -104,7 +110,13 @@ func deploy(servers []string, password, overlayURL string) (string, error) {
 		st.overlayURL = overlayURL
 	}
 
-	if st.etCmd != nil && st.pipeUp {
+	// Rotation cleanup is only meaningful when we are actually switching from a
+	// running ET (i.e. this IS a rotation, not a cold /start). If ET is not
+	// running the pipeline-connect branch below is inert anyway and the normal
+	// launch path handles it.
+	rotating := cfg.RotatePK3Clear && st.etCmd != nil
+
+	if !rotating && st.etCmd != nil && st.pipeUp {
 		line := "connect " + target
 		if password != "" {
 			line = "password \"" + password + "\";" + line
@@ -122,8 +134,22 @@ func deploy(servers []string, password, overlayURL string) (string, error) {
 		}
 	}
 
+	// Rotation with PK3 cleanup: stop the replay instance too so it does not
+	// hold a demo file open under the shared homepath while we delete. Kills
+	// are PID-only under multi-instance mode (see kill()), so this is safe.
+	if rotating && rp != nil {
+		replay.stop() // abort any in-flight replay (no-op if idle)
+		rp.mu.Lock()
+		rp.kill()
+		rp.fsGame = ""
+		rp.mu.Unlock()
+	}
 	st.kill()
 	time.Sleep(1 * time.Second)
+	if rotating {
+		// ET is now fully closed on both instances -> safe to delete.
+		rotationPK3Cleanup()
+	}
 	log.Println("deploy: (re)starting ET ->", target)
 	if err := startET(target, password); err != nil {
 		return "", err
