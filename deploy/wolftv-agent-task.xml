@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  WolfTV agent autostart task.
+
+  Runs the agent in the LOGGED-IN INTERACTIVE session at logon and restarts it
+  on failure. This is deliberately NOT a Windows service: ET and OBS need a
+  desktop and GPU access, both of which a service session (session 0) does not
+  have. Restart-on-failure here is a second safety net beneath the agent's own
+  in-process crash-restart (see crash.go / README "Crash reporting").
+
+  The stderr redirect (`2>>` on the crash file) captures fatal runtime errors
+  that recover() cannot ("fatal error: concurrent map writes", OOM, deadlock
+  detection): without it, those deaths leave nothing behind at all.
+
+  BEFORE IMPORTING: edit the four <Command> / <Arguments> / <WorkingDirectory>
+  placeholders below to match this machine. Import with:
+
+      schtasks /Create /TN "WolfTV-Agent" /XML wolftv-agent-task.xml
+
+  Verify with:
+
+      schtasks /Query /TN "WolfTV-Agent" /V /FO LIST
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>WolfTV agent: launched at user logon in the interactive session; restarted on failure. NOT a service (ET/OBS need a desktop and GPU).</Description>
+    <Author>WolfTV</Author>
+    <URI>\WolfTV-Agent</URI>
+  </RegistrationInfo>
+
+  <Triggers>
+    <!-- Fire once the interactive session logs in, so the child inherits the
+         desktop and GPU. The machine must auto-login (see README). -->
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <!-- Set <UserId> to constrain to a specific account. Leave unset to
+           trigger for any user logon. -->
+      <!-- <UserId>DOMAIN\\wahke</UserId> -->
+      <Delay>PT10S</Delay>
+    </LogonTrigger>
+  </Triggers>
+
+  <Principals>
+    <!-- Run as the interactive user so ET/OBS can attach to the desktop.
+         S4U (no password stored) + InteractiveToken means the task uses the
+         logged-in user's session. Change <UserId> to your account. -->
+    <Principal id="Author">
+      <UserId>PLACEHOLDER-USERNAME</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <!-- The core: restart the agent whenever it exits non-zero. Beneath the
+         in-process crash-restart, this is the last line of defence for the
+         fatal runtime errors recover() cannot catch. -->
+    <RestartOnFailure>
+      <Interval>PT30S</Interval>
+      <Count>1000</Count>
+    </RestartOnFailure>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+
+  <Actions Context="Author">
+    <!-- The agent is launched through cmd /c so the shell can perform the
+         stderr redirect: `2>>` appends the fatal runtime message to
+         crash-stderr.log. Without this file, an OOM or "concurrent map writes"
+         death leaves no evidence. -->
+    <Exec>
+      <Command>C:\Windows\System32\cmd.exe</Command>
+      <Arguments>/c "cd /d C:\wolffiles_agent &amp;&amp; wolftv-agent.exe config.json 2&gt;&gt; crash-stderr.log"</Arguments>
+      <WorkingDirectory>C:\wolffiles_agent</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

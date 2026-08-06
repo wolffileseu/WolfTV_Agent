@@ -458,6 +458,57 @@ so the runtime's fatal message lands in a file even when nothing in Go can run
 any more. The Task Scheduler "restart on failure" then brings the process back
 and `adoptLiveET` re-attaches to the live ET.
 
+### Autostart (Windows Task Scheduler)
+
+The agent survives without RDP: on boot the machine auto-logs in, the Task
+Scheduler starts the agent in the interactive session, and if the agent ever
+exits the scheduler restarts it. This is a **second safety net beneath the
+in-process crash-restart** (see "Crash reporting"): the in-process restart
+handles Go panics; the scheduler handles the runtime deaths recover() cannot
+catch (`fatal error: concurrent map writes`, OOM, deadlock detection) and any
+crash-loop-breaker trip.
+
+**Deliberately NOT a Windows service.** ET and OBS need a **desktop and GPU
+access**; a service session (session 0) has neither. The agent runs in the
+logged-in interactive session, which does. The trade-off is that the machine
+must auto-login after reboot — with AnyDesk holding the session open, that is
+the current model.
+
+**Install** (from an elevated PowerShell in `deploy/`):
+
+```powershell
+.\install-autostart.ps1 -InstallDir C:\wolftv -User $env:USERNAME
+```
+
+The script patches `deploy/wolftv-agent-task.xml` with the install directory
+and the user account, then imports it. `wolftv-agent.exe` and `config.json`
+must already be under `InstallDir`. Re-running the installer replaces the task.
+
+The Exec line the task runs is:
+
+```
+cmd /c "cd /d <InstallDir> && wolftv-agent.exe config.json 2>> crash-stderr.log"
+```
+
+The **`2>> crash-stderr.log`** redirect is the point of using `cmd /c`: without
+it, a fatal runtime error leaves nothing on disk at all — Go writes the message
+to stderr and the process ends before anything else can run. With the redirect,
+even a `fatal error: concurrent map writes` lands in `crash-stderr.log` and the
+scheduler restarts the agent, which then re-attaches to the live ET via the
+existing adoption path (`adoptLiveET`, strengthened to close a hung ET instead
+of adopting a corpse).
+
+**Verify by killing the agent:**
+
+```powershell
+Stop-Process -Name wolftv-agent -Force
+# ~30s later:
+Get-Process wolftv-agent  # scheduler brought it back
+```
+
+The agent's `adoptLiveET` should re-attach to the still-running ET; the panel
+`/status` reports `adopted: true` briefly and the broadcast never drops.
+
 ### Security
 
 The agent's control port lets a caller drive your stream and run client
