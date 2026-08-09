@@ -272,6 +272,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		// an adopted ET has no child handle but is genuinely running.
 		"et_running":     st.etCmd != nil || st.adopted,
 		"adopted":        st.adopted,
+		"agent_version":  version,
 		"server":         st.currentServer,
 		"watchdog":       st.desired,
 		"pipeline":       st.pipeUp,
@@ -442,6 +443,12 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	// Handled before loadConfig so `wolftv-agent -version` works on a fresh
+	// box that has no config.json yet.
+	if detectVersionFlag(os.Args[1:]) {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 	// Backstop for a panic on the main goroutine itself (config parse, HTTP
 	// serve). recover() cannot catch fatal runtime errors ("concurrent map
 	// writes", OOM) or os.Exit -- for those the stderr redirect from the
@@ -494,7 +501,7 @@ func main() {
 	http.HandleFunc("/director/config", handleDirectorConfig)
 	http.HandleFunc("/director/status", handleDirectorStatus)
 	http.HandleFunc("/twitch/status", handleTwitchStatus)
-	log.Println("wolftv-agent v1.0.0 listening on", cfg.Listen)
+	log.Println(startupBanner(cfg.Listen))
 	// serveWithRetry (not ListenAndServe) so a /restart handoff can rebind the
 	// port once the previous process releases it.
 	log.Fatal(serveWithRetry(cfg.Listen, nil))

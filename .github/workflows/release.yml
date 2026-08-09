@@ -12,10 +12,16 @@ jobs:
         with:
           go-version: '1.23'
       - name: Build Linux + Windows
+        # GITHUB_REF_NAME is the tag on a tag-triggered run (this workflow
+        # fires on `push: tags: v*`), e.g. v1.0.0. Injecting it via
+        # -X main.version means the binary's -version, its /status.agent_version
+        # and its startup log line are always the git tag -- no code edit per
+        # release, no drift between the tag and what the binary reports.
         run: |
           mkdir -p dist
-          GOOS=linux   GOARCH=amd64 go build -ldflags "-s -w" -o dist/wolftv-agent .
-          GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -o dist/wolftv-agent.exe .
+          VERSION="${GITHUB_REF_NAME}"
+          GOOS=linux   GOARCH=amd64 go build -ldflags "-s -w -X main.version=${VERSION}" -o dist/wolftv-agent .
+          GOOS=windows GOARCH=amd64 go build -ldflags "-s -w -X main.version=${VERSION}" -o dist/wolftv-agent.exe .
       - name: Release
         uses: softprops/action-gh-release@v2
         with:

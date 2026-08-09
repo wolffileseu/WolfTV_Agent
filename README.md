@@ -674,6 +674,39 @@ Cross-platform behaviour is handled with Go build tags:
   Windows-only default-audio-**device** check (COM API) has a Linux no-op
   stub; PipeWire/PulseAudio control can be added later.
 
+## Releasing
+
+The version reported by the binary (startup log, `GET /status.agent_version`,
+`wolftv-agent -version`) comes from the **git tag**, injected at build time
+via `-ldflags "-X main.version=$(git describe --tags --always --dirty)"`. The
+source contains only `var version = "dev"`; there is no hardcoded release
+number to keep in sync, so the tag and what the binary reports can never drift.
+
+**SemVer scheme** (rule of thumb: if a user must change something for the
+update to work, it's MAJOR; if they just get fixes, PATCH; new stuff that
+doesn't break them, MINOR):
+
+- **PATCH** (`v1.0.x`) — bug fixes only. No new features, no config changes.
+- **MINOR** (`v1.x.0`) — new features, backwards compatible: the old
+  `config.json` still works and the same operational setup keeps working.
+- **MAJOR** (`vX.0.0`) — breaking changes: `config.json`, the deploy
+  workflow, or the operational contract needs updating.
+
+**Cutting a release:**
+
+```sh
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+The `release.yml` workflow triggers on `v*` tags, builds Linux and Windows
+binaries with the tag baked in via `-X main.version=${GITHUB_REF_NAME}`, and
+publishes a GitHub release with both artifacts attached.
+
+Untagged development builds (or a plain `go build` locally) report `dev`;
+a build off an untagged commit reports something like `v1.0.0-3-gabc1234` —
+either is obviously not a release.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
