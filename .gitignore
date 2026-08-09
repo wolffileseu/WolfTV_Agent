@@ -14,8 +14,14 @@ director.json
 director.json.tmp
 live-state.json
 live-state.json.tmp
+crash.txt
+crash-*.log
+crashes.log
 
 # editor / os
 .DS_Store
 .idea/
 .vscode/
+
+# Claude
+.claude/
