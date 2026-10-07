@@ -13,6 +13,9 @@ package main
 //     paks (pak0.pk3, pak1.pk3, pak2.pk3, mp_bin.pk3) live there and deleting
 //     them bricks ET. This is enforced as a hard reject of any rule for the
 //     etmain folder, PLUS a defence-in-depth guard inside applyRule.
+//   - A fixed set of filenames (protectedPK3Patterns: wolftv_assets.pk3, the
+//     base paks, legacy_*.pk3) is never deleted in ANY folder, even if a rule
+//     targets it. Name-based, so it survives changes to the scan scope.
 //   - Only *.pk3 files DIRECTLY INSIDE the configured folder are candidates
 //     (no recursion, no other extensions).
 //   - The folder path must resolve inside rotate_pk3_homepath. Anything
@@ -54,6 +57,7 @@ type pk3Rule struct {
 type pk3CleanReport struct {
 	Folder       string
 	Deleted      []string
+	Protected    []string // matched a rule for deletion but kept by protectedPK3Patterns
 	Kept         int
 	BytesFreed   int64
 	SkippedNoDir bool // folder does not exist -> no-op (not an error)
@@ -114,6 +118,31 @@ func parsePK3Rules(raw []PK3RuleJSON) ([]pk3Rule, error) {
 // bypasses the parser cannot delete a base pak.
 func isProtectedEtmain(folder string) bool {
 	return strings.EqualFold(folder, "etmain")
+}
+
+// protectedPK3Patterns are basenames (filepath.Match syntax, lower-case) that
+// are never deleted, in any folder and in any mode, whatever a rule says. This
+// is a name-level gate independent of the etmain folder guard, so it still
+// holds if the scan scope ever widens (basepath, legacy/, recursion...).
+var protectedPK3Patterns = []string{
+	"wolftv_assets.pk3", // shipped by the WolfTV client in legacy/
+	"pak0.pk3",
+	"pak1.pk3",
+	"pak2.pk3",
+	"mp_bin.pk3",
+	"legacy_*.pk3", // ET: Legacy's own mod pak(s) in legacy/
+}
+
+// isProtectedPK3 reports whether a basename matches protectedPK3Patterns,
+// case-insensitively.
+func isProtectedPK3(name string) bool {
+	lower := strings.ToLower(name)
+	for _, p := range protectedPK3Patterns {
+		if ok, _ := filepath.Match(p, lower); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveFolder resolves the rule's folder under the homepath and enforces
@@ -199,6 +228,12 @@ func applyRule(homepath string, r pk3Rule) (pk3CleanReport, error) {
 			deleteIt = listed // delete listed, keep rest
 		}
 		if !deleteIt {
+			rep.Kept++
+			continue
+		}
+		if isProtectedPK3(name) {
+			log.Printf("pk3clean: SKIP %s/%s (protected)", r.Folder, name)
+			rep.Protected = append(rep.Protected, name)
 			rep.Kept++
 			continue
 		}

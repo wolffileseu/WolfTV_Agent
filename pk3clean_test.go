@@ -312,3 +312,75 @@ func TestLoggerMentionsClearedAll(t *testing.T) {
 		t.Error("empty-whitelist rule must set ClearedAll so the warning fires")
 	}
 }
+
+// TestWolfTVAssetsSurviveCleanup: the WolfTV client ships legacy/wolftv_assets.pk3.
+// An empty whitelist on legacy/ (delete everything) must still keep it, plus
+// ET: Legacy's own legacy_*.pk3, while ordinary pk3s are removed as before.
+func TestWolfTVAssetsSurviveCleanup(t *testing.T) {
+	home := makeHomepath(t, map[string]string{
+		"legacy/wolftv_assets.pk3":  "assets",
+		"legacy/legacy_v2.83.2.pk3": "mod",
+		"legacy/random-map1.pk3":    "junk",
+		"legacy/random-map2.pk3":    "junk",
+	})
+	rules, err := parsePK3Rules([]PK3RuleJSON{{Folder: "legacy", Mode: "whitelist"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reports, err := applyPK3Rules(home, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := reports[0]
+	sort.Strings(rep.Deleted)
+	if want := "random-map1.pk3,random-map2.pk3"; strings.Join(rep.Deleted, ",") != want {
+		t.Errorf("Deleted = %v, want %s", rep.Deleted, want)
+	}
+	sort.Strings(rep.Protected)
+	if want := "legacy_v2.83.2.pk3,wolftv_assets.pk3"; strings.Join(rep.Protected, ",") != want {
+		t.Errorf("Protected = %v, want %s", rep.Protected, want)
+	}
+	if rep.Kept != 2 {
+		t.Errorf("Kept = %d, want 2", rep.Kept)
+	}
+	got := listPk3s(t, home, "legacy")
+	if want := "legacy_v2.83.2.pk3,wolftv_assets.pk3"; strings.Join(got, ",") != want {
+		t.Errorf("remaining = %v, want %s", got, want)
+	}
+}
+
+// TestProtectedBeatsBlacklist: explicitly blacklisting a protected file (any
+// case) still does not delete it; other listed files go as usual.
+func TestProtectedBeatsBlacklist(t *testing.T) {
+	home := makeHomepath(t, map[string]string{
+		"legacy/WolfTV_Assets.PK3": "assets",
+		"legacy/pak0.pk3":          "base",
+		"legacy/broken.pk3":        "remove",
+	})
+	rules, _ := parsePK3Rules([]PK3RuleJSON{{
+		Folder: "legacy", Mode: "blacklist",
+		List: []string{"WolfTV_Assets.PK3", "pak0.pk3", "broken.pk3"},
+	}})
+	reports, _ := applyPK3Rules(home, rules)
+	if d := reports[0].Deleted; len(d) != 1 || d[0] != "broken.pk3" {
+		t.Errorf("Deleted = %v, want [broken.pk3]", d)
+	}
+	got := listPk3s(t, home, "legacy")
+	if want := "WolfTV_Assets.PK3,pak0.pk3"; strings.Join(got, ",") != want {
+		t.Errorf("remaining = %v, want %s", got, want)
+	}
+}
+
+func TestIsProtectedPK3(t *testing.T) {
+	for _, n := range []string{"wolftv_assets.pk3", "WOLFTV_ASSETS.PK3", "pak0.pk3", "PAK1.pk3",
+		"pak2.pk3", "mp_bin.pk3", "legacy_v2.83.2.pk3", "Legacy_V2.82.pk3"} {
+		if !isProtectedPK3(n) {
+			t.Errorf("%s should be protected", n)
+		}
+	}
+	for _, n := range []string{"wolftv_assets_old.pk3", "pak3.pk3", "goldrush.pk3", "nq_v1.2.9_3.pk3", "mylegacy_x.pk3"} {
+		if isProtectedPK3(n) {
+			t.Errorf("%s should NOT be protected", n)
+		}
+	}
+}
