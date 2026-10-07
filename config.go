@@ -11,8 +11,8 @@ import (
 type Config struct {
 	Listen    string   `json:"listen"`      // "0.0.0.0:8788"
 	Token     string   `json:"token"`       // bearer token (min 16)
-	EtPath    string   `json:"et_path"`     // "C:\\ETLegacy\\etl.exe"
-	EtExeName string   `json:"et_exe_name"` // "etl.exe"
+	EtPath    string   `json:"et_path"`     // "C:\\ETLegacy\\wolftv.exe"
+	EtExeName string   `json:"et_exe_name"` // "wolftv.exe"
 	EtArgs    []string `json:"et_args"`     // extra args
 	// Resolution preset (720p|1080p|1440p|2160p) translated into r_mode/
 	// r_customwidth/r_customheight at launch, for both instances. Explicit
@@ -159,8 +159,8 @@ const defaultConfig = `{
   "listen": "0.0.0.0:8788",
   "token": "CHANGE_ME_MIN_32_RANDOM_CHARS",
 
-  "et_path": "C:\\ETLegacy\\etl.exe",
-  "et_exe_name": "etl.exe",
+  "et_path": "C:\\ETLegacy\\wolftv.exe",
+  "et_exe_name": "wolftv.exe",
   "et_args": [
     "+set", "r_mode", "-1",
     "+set", "r_customwidth", "1920",
@@ -291,7 +291,7 @@ func applyDefaults(c *Config, warn bool) {
 		}
 	}
 	if c.EtExeName == "" {
-		c.EtExeName = "etl.exe"
+		c.EtExeName = "wolftv.exe"
 	}
 	if c.ObsAddr == "" {
 		c.ObsAddr = "localhost:4455"
